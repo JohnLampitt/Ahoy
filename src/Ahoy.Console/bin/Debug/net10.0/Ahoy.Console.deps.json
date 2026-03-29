@@ -1,0 +1,74 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v10.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v10.0": {
+      "Ahoy.Console/1.0.0": {
+        "dependencies": {
+          "Ahoy.Core": "1.0.0",
+          "Ahoy.Simulation": "1.0.0",
+          "Ahoy.WorldData": "1.0.0"
+        },
+        "runtime": {
+          "Ahoy.Console.dll": {}
+        }
+      },
+      "Ahoy.Core/1.0.0": {
+        "runtime": {
+          "Ahoy.Core.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
+      "Ahoy.Simulation/1.0.0": {
+        "dependencies": {
+          "Ahoy.Core": "1.0.0"
+        },
+        "runtime": {
+          "Ahoy.Simulation.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      },
+      "Ahoy.WorldData/1.0.0": {
+        "dependencies": {
+          "Ahoy.Core": "1.0.0",
+          "Ahoy.Simulation": "1.0.0"
+        },
+        "runtime": {
+          "Ahoy.WorldData.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "Ahoy.Console/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Ahoy.Core/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Ahoy.Simulation/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "Ahoy.WorldData/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}

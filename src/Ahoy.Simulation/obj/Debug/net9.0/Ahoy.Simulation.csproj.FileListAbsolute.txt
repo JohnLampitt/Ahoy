@@ -1,0 +1,15 @@
+C:\dev\Ahoy\src\Ahoy.Simulation\bin\Debug\net9.0\Ahoy.Simulation.deps.json
+C:\dev\Ahoy\src\Ahoy.Simulation\bin\Debug\net9.0\Ahoy.Simulation.dll
+C:\dev\Ahoy\src\Ahoy.Simulation\bin\Debug\net9.0\Ahoy.Simulation.pdb
+C:\dev\Ahoy\src\Ahoy.Simulation\bin\Debug\net9.0\Ahoy.Core.dll
+C:\dev\Ahoy\src\Ahoy.Simulation\bin\Debug\net9.0\Ahoy.Core.pdb
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\Ahoy.Simulation.csproj.AssemblyReference.cache
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\Ahoy.Simulation.GeneratedMSBuildEditorConfig.editorconfig
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\Ahoy.Simulation.AssemblyInfoInputs.cache
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\Ahoy.Simulation.AssemblyInfo.cs
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\Ahoy.Simulation.csproj.CoreCompileInputs.cache
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\Ahoy.Sim.C201BDC8.Up2Date
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\Ahoy.Simulation.dll
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\refint\Ahoy.Simulation.dll
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\Ahoy.Simulation.pdb
+C:\dev\Ahoy\src\Ahoy.Simulation\obj\Debug\net9.0\ref\Ahoy.Simulation.dll

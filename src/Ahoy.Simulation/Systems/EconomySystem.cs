@@ -1,0 +1,163 @@
+using Ahoy.Core.Enums;
+using Ahoy.Core.Ids;
+using Ahoy.Simulation.Engine;
+using Ahoy.Simulation.Events;
+using Ahoy.Simulation.State;
+
+namespace Ahoy.Simulation.Systems;
+
+/// <summary>
+/// System 3 — runs after ShipMovementSystem.
+/// Handles production/consumption, price updates, merchant trade execution,
+/// and prosperity drift per port.
+/// Queries KnowledgeStore (read-only) for merchant routing decisions at non-Local LOD.
+/// </summary>
+public sealed class EconomySystem : IWorldSystem
+{
+    private readonly Random _rng;
+
+    public EconomySystem(Random? rng = null)
+    {
+        _rng = rng ?? Random.Shared;
+    }
+
+    public void Tick(WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        foreach (var (portId, port) in state.Ports)
+        {
+            var lod = context.GetLod(port.RegionId);
+
+            // Tick modifiers — decrement durations and remove expired ones
+            var expired = port.Economy.ActiveModifiers
+                .Where(m => --m.TicksRemaining <= 0)
+                .ToList();
+            foreach (var m in expired)
+                port.Economy.ActiveModifiers.Remove(m);
+
+            // Production and consumption
+            ProduceAndConsume(port, lod);
+
+            // Price signal events for visible ports
+            if (lod is SimulationLod.Local or SimulationLod.Regional)
+                EmitPriceShifts(port, portId, state, events, lod);
+        }
+
+        // Merchant trade — only ships that are docked
+        foreach (var ship in state.Ships.Values.Where(s => !s.IsPlayerShip))
+        {
+            if (ship.Location is not AtPort atPort) continue;
+            if (!state.Ports.TryGetValue(atPort.Port, out var port)) continue;
+
+            var lod = context.GetLod(port.RegionId);
+            ExecuteMerchantTrade(ship, port, state, events, lod);
+
+            // If arrived this tick — process knowledge gossip (KnowledgeSystem handles this;
+            // EconomySystem just ensures cargo is exchanged before KnowledgeSystem runs)
+        }
+    }
+
+    private static void ProduceAndConsume(Port port, SimulationLod lod)
+    {
+        var economy = port.Economy;
+
+        // Apply scaled production/consumption at coarser LODs
+        var scale = lod switch
+        {
+            SimulationLod.Local    => 1.0f,
+            SimulationLod.Regional => 1.0f,
+            SimulationLod.Distant  => 1.0f, // still tick — just emits no events
+            _ => 1.0f,
+        };
+
+        foreach (var (good, amount) in economy.BaseProduction)
+        {
+            var produced = (int)(amount * scale);
+            economy.Supply[good] = economy.Supply.GetValueOrDefault(good) + produced;
+        }
+
+        foreach (var (good, amount) in economy.BaseConsumption)
+        {
+            var consumed = (int)(amount * scale);
+            var demand = economy.Demand.GetValueOrDefault(good) + consumed;
+            economy.Demand[good] = demand;
+
+            // Consume from supply if available
+            var supply = economy.Supply.GetValueOrDefault(good);
+            var actualConsumed = Math.Min(supply, consumed);
+            economy.Supply[good] = supply - actualConsumed;
+            economy.Demand[good] = Math.Max(0, demand - actualConsumed);
+        }
+
+        // Prosperity drift based on supply/demand balance
+        var surplusGoods = economy.BaseProduction.Keys
+            .Count(g => economy.Supply.GetValueOrDefault(g) > economy.Demand.GetValueOrDefault(g));
+        var shortageGoods = economy.BaseConsumption.Keys
+            .Count(g => economy.Demand.GetValueOrDefault(g) > economy.Supply.GetValueOrDefault(g));
+
+        var prosperityDelta = (surplusGoods - shortageGoods) * 0.5f;
+        port.Prosperity = Math.Clamp(port.Prosperity + prosperityDelta, 0f, 100f);
+    }
+
+    private static void EmitPriceShifts(Port port, PortId portId, WorldState state,
+        IEventEmitter events, SimulationLod lod)
+    {
+        foreach (var good in port.Economy.BasePrice.Keys)
+        {
+            // Emit event if effective price moved significantly (>10%)
+            var basePrice = port.Economy.BasePrice[good];
+            var effective = port.Economy.EffectivePrice(good);
+            var delta = Math.Abs(effective - basePrice) / (float)Math.Max(basePrice, 1);
+            if (delta > 0.10f)
+                events.Emit(new PriceShifted(state.Date, lod, portId, good, basePrice, effective), lod);
+        }
+    }
+
+    private void ExecuteMerchantTrade(Ship ship, Port port, WorldState state,
+        IEventEmitter events, SimulationLod lod)
+    {
+        var economy = port.Economy;
+
+        // SELL cargo the ship is carrying that the port demands
+        foreach (var (good, qty) in ship.Cargo.ToList())
+        {
+            var demand = economy.Demand.GetValueOrDefault(good);
+            if (demand <= 0) continue;
+
+            var sellQty = Math.Min(qty, demand);
+            var price = economy.EffectivePrice(good);
+
+            ship.Cargo[good] -= sellQty;
+            if (ship.Cargo[good] <= 0) ship.Cargo.Remove(good);
+
+            economy.Supply[good] = economy.Supply.GetValueOrDefault(good) + sellQty;
+            economy.Demand[good] -= sellQty;
+
+            ship.GoldOnBoard += price * sellQty;
+            events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, sellQty, price, false), lod);
+        }
+
+        // BUY goods the port produces that the ship has space for
+        var cargoUsed = ship.Cargo.Values.Sum();
+        var cargoFree = ship.MaxCargoTons - cargoUsed;
+        if (cargoFree <= 0) return;
+
+        foreach (var (good, supply) in economy.Supply.ToList())
+        {
+            if (supply <= 0) continue;
+            if (cargoFree <= 0) break;
+
+            // Find a destination that demands this good (simple: just buy if profitable at any adjacent port)
+            var buyQty = Math.Min(Math.Min(supply, cargoFree), 50); // cap 50 tons
+            var price = economy.EffectivePrice(good);
+
+            if (ship.GoldOnBoard < price * buyQty) continue;
+
+            economy.Supply[good] -= buyQty;
+            ship.Cargo[good] = ship.Cargo.GetValueOrDefault(good) + buyQty;
+            ship.GoldOnBoard -= price * buyQty;
+            cargoFree -= buyQty;
+
+            events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, buyQty, price, true), lod);
+        }
+    }
+}

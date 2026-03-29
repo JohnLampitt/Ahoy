@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /c/dev/Ahoy init)",
+      "Bash(dotnet new:*)",
+      "Bash(\"/c/Program Files/dotnet/dotnet\" --version)",
+      "Read(//c/Program Files/dotnet//**)",
+      "Read(//c/Program Files/dotnet/**)",
+      "Bash(dotnet --version)",
+      "Bash(dotnet --list-sdks)",
+      "Bash(dotnet build:*)",
+      "Bash(dotnet run:*)",
+      "Bash(for f:*)",
+      "Bash(do sed:*)",
+      "Bash(done)",
+      "Bash(git add:*)"
+    ]
+  }
+}

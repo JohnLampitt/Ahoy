@@ -1,0 +1,11 @@
+C:\dev\Ahoy\src\Ahoy.Core\bin\Debug\net9.0\Ahoy.Core.deps.json
+C:\dev\Ahoy\src\Ahoy.Core\bin\Debug\net9.0\Ahoy.Core.dll
+C:\dev\Ahoy\src\Ahoy.Core\bin\Debug\net9.0\Ahoy.Core.pdb
+C:\dev\Ahoy\src\Ahoy.Core\obj\Debug\net9.0\Ahoy.Core.GeneratedMSBuildEditorConfig.editorconfig
+C:\dev\Ahoy\src\Ahoy.Core\obj\Debug\net9.0\Ahoy.Core.AssemblyInfoInputs.cache
+C:\dev\Ahoy\src\Ahoy.Core\obj\Debug\net9.0\Ahoy.Core.AssemblyInfo.cs
+C:\dev\Ahoy\src\Ahoy.Core\obj\Debug\net9.0\Ahoy.Core.csproj.CoreCompileInputs.cache
+C:\dev\Ahoy\src\Ahoy.Core\obj\Debug\net9.0\Ahoy.Core.dll
+C:\dev\Ahoy\src\Ahoy.Core\obj\Debug\net9.0\refint\Ahoy.Core.dll
+C:\dev\Ahoy\src\Ahoy.Core\obj\Debug\net9.0\Ahoy.Core.pdb
+C:\dev\Ahoy\src\Ahoy.Core\obj\Debug\net9.0\ref\Ahoy.Core.dll
