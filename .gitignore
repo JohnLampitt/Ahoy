@@ -16,5 +16,5 @@ obj/
 .DS_Store
 Thumbs.db
 
-# Local claude settings (keep tracked — team config)
-# .claude/
+# Claude Code — keep project memory, exclude machine-local settings
+.claude/settings.local.json
