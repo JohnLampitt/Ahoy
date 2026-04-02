@@ -1,7 +1,7 @@
 # Ahoy — System Design: Knowledge System
 
 > **Status:** Living document.
-> **Version:** 0.1
+> **Version:** 0.2 — added fact provenance model (SourceHolder, BaseConfidence, CorroborationCount)
 > **Depends on:** SDD-WorldState.md, SDD-EconomySystem.md
 
 ---
@@ -29,34 +29,56 @@ This system replaces the simple `KnownEvent` and `MerchantKnowledge` models from
 A `KnowledgeFact` is a claim about the state of the world at a specific point in time, held by one or more actors.
 
 ```csharp
-// Ahoy.Simulation/Knowledge/KnowledgeFact.cs
+// Ahoy.Simulation/State/KnowledgeStore.cs (actual implementation)
 
 public sealed class KnowledgeFact
 {
-    public KnowledgeFactId   Id          { get; init; }
-    public KnowledgeCategory Category    { get; init; }
-    public KnowledgeSensitivity Sensitivity { get; init; }
+    public KnowledgeFactId      Id              { get; init; } = KnowledgeFactId.New();
+    public required KnowledgeClaim Claim        { get; init; }
+    public KnowledgeSensitivity Sensitivity     { get; init; }
 
-    // What the fact describes
-    public KnowledgeClaim    Claim       { get; init; }
+    // How confident the holder is in this fact (0..1). Degrades each tick and each hop.
+    public float                Confidence      { get; set; }
 
-    // When and where the underlying event occurred
-    public WorldDate         OccurredAt  { get; init; }
-    public RegionId          OccurredIn  { get; init; }
+    // The world date this fact was observed / last confirmed.
+    public required WorldDate   ObservedDate    { get; init; }
 
-    // How confident the original source was (1.0 = directly witnessed)
-    public float             BaseConfidence { get; init; }
+    // True if this fact was deliberately seeded as false information.
+    // The holder believes it is true; only the seeder knows otherwise.
+    public bool                 IsDisinformation { get; init; }
 
-    // Is this fact still current, or has it been superseded by newer information?
-    public bool              IsSuperseded   { get; internal set; }
+    // Number of hops this fact has propagated from its origin.
+    // 0 = directly witnessed by the holder; 1 = heard from a witness; etc.
+    public int                  HopCount        { get; set; }
 
-    // Has this fact been deliberately falsified by an actor?
-    // Only the injecting faction knows this is true — holders do not.
-    public bool              IsDisinformation { get; internal set; }
+    // True when a newer fact about the same subject has superseded this one.
+    public bool                 IsSuperseded    { get; set; }
+
+    // Tick on which this fact was superseded. Superseded facts are kept for one full
+    // tick so other systems (e.g. LLM context) can read prior beliefs before pruning.
+    public int?                 SupersededOnTick { get; set; }
+
+    // ---- Provenance ----
+
+    // Who passed this copy of the fact to the current holder.
+    // Null means the holder witnessed the underlying event directly.
+    // Uses the same KnowledgeHolderId union as every other actor — the player is
+    // not special-cased; a PlayerHolder source is possible (player told the port).
+    public KnowledgeHolderId?   SourceHolder    { get; init; }
+
+    // The confidence value at the moment this copy was created, before any
+    // per-tick decay. Stored so "how reliable was this when I got it?" can be
+    // answered without reconstructing history.
+    public float                BaseConfidence  { get; init; }
+
+    // How many times the same claim has arrived from a *different* source.
+    // Corroborating arrivals increment this counter rather than creating a
+    // duplicate fact. Higher counts increase effective credibility.
+    public int                  CorroborationCount { get; set; }
 }
 ```
 
-`KnowledgeFact` is **immutable after creation** (except `IsSuperseded` and `IsDisinformation`). When the world changes, the old fact is marked superseded and a new fact is created — the history of what people believed at each point is preserved.
+`KnowledgeFact` is largely immutable after creation. Mutable fields are limited to runtime state (`Confidence`, `HopCount`, `IsSuperseded`, `SupersededOnTick`, `CorroborationCount`). When the world changes, the old fact is marked superseded and a new fact is created — the history of what people believed at each point is preserved.
 
 ---
 
@@ -276,6 +298,34 @@ private void ProcessKnowledgeArrival(Ship ship, Port port, WorldState state)
 | **Guarded** | Never passively | Rarely | Trust + context |
 | **Secret** | Never | Never passively | Active trade only |
 
+### 5.3 Corroboration Instead of Duplication
+
+When a holder receives a fact via propagation, `ShareFacts` checks whether they already hold a non-superseded fact with the same subject key (`KnowledgeFact.GetSubjectKey`):
+
+- **Same claim, same source** — identical retelling; skip entirely (no duplicate).
+- **Same claim, different source** — corroboration. Increment `CorroborationCount` on the existing fact; do *not* create a new fact. This avoids knowledge stores ballooning with duplicate entries.
+- **Different claim, same subject** — potential contradiction. Both facts coexist; both are flagged `IsContradicted = true` (future field). The holder must resolve the ambiguity through investigation or time.
+
+```
+incoming fact arrives for holder H:
+
+  existing? ──No──► create new fact (SourceHolder = propagating entity)
+      │
+     Yes
+      │
+  same claim? ──No──► contradiction: flag both; keep both active
+      │
+     Yes
+      │
+  same source? ──Yes──► skip (duplicate retelling)
+      │
+      No
+      │
+  CorroborationCount++   (no new fact object)
+```
+
+The net effect: each holder has **at most one active fact per subject key** (unless contradicted), and `CorroborationCount` summarises independent confirmation.
+
 ### 5.3 Confidence Degradation
 
 When a fact passes through an intermediary, confidence is reduced. A firsthand account loses fidelity as it becomes secondhand, then thirdhand:
@@ -420,16 +470,109 @@ The player can't always know if a purchased fact is:
 - **Stale** — superseded by newer events
 - **Disinformation** — deliberately falsified
 
-Indicators of reliability:
-- `Confidence` score (shown to the player)
-- Source reputation (a known reliable broker vs. a dock rat)
-- Corroboration — the same claim from multiple independent sources raises effective confidence
+Indicators of reliability visible to the player:
+- `Confidence` score (decays with time and hops)
+- `HopCount` — 0 = firsthand; higher = more retelling noise
+- `CorroborationCount` — how many independent sources have confirmed the same claim
+- `SourceHolder` identity — a named individual source (`IndividualHolder`) may have a known reputation; a `PortHolder` source means general port gossip
 
-If the player acts on a fact and it proves false (they sail to an "unguarded" port and find a full patrol), they can mark the source as unreliable — feeding back into their relationship with that broker.
+The player cannot see `IsDisinformation` directly. Discovery is through contradiction (they hold a conflicting claim from a different source) or failed action (the claimed ship was not there).
+
+**Investigation mechanic**: if the player sails to a location relevant to a fact (e.g. the region named in a `ShipLocationClaim`), the system produces a new direct observation: `HopCount = 0`, `SourceHolder = null` (self-witnessed). This either:
+- corroborates the existing fact (`CorroborationCount++`, confidence reinforced), or
+- contradicts it (new fact with conflicting claim, both flagged).
+
+The player then holds first-hand evidence and can sell it, act on it, or confront the original source.
 
 ---
 
-## 8. Misinformation
+## 8. Fact Provenance
+
+### 8.1 Fields Summary
+
+| Field | Type | Mutability | Purpose |
+|---|---|---|---|
+| `SourceHolder` | `KnowledgeHolderId?` | immutable | Who passed this copy. Null = directly witnessed. |
+| `BaseConfidence` | `float` | immutable | Confidence at creation; reference for how credible the original report was. |
+| `CorroborationCount` | `int` | mutable | Number of additional independent confirmations received after the original. |
+| `HopCount` | `int` | mutable | How many intermediaries the fact traversed before reaching this holder. |
+
+### 8.2 Why SourceHolder, Not SourcePortId
+
+An earlier design considered recording only the port where a fact was acquired. This was rejected because:
+
+1. **Players are not special.** If a `PlayerHolder` tells a port about something they witnessed, the port should record `SourceHolder = new PlayerHolder()` — the same mechanism a `ShipHolder` or `IndividualHolder` source uses.
+2. **Port is not the source.** The port population pool (`PortHolder`) is a relay, not the origin. `SourceHolder` names the immediate entity that passed the fact on, not the intermediary pool.
+3. **Uniformity.** The same `KnowledgeHolderId` union represents all actors. No special casing, no parallel system for player vs NPC provenance.
+
+### 8.3 Propagation: Setting SourceHolder
+
+When `ShareFacts(from, to, ...)` creates a propagated copy:
+
+```csharp
+var propagated = new KnowledgeFact
+{
+    Claim           = fact.Claim,
+    Sensitivity     = fact.Sensitivity,
+    Confidence      = Math.Max(0f, fact.Confidence - HopConfidencePenalty),
+    BaseConfidence  = fact.Confidence,   // confidence at the moment of handoff
+    ObservedDate    = fact.ObservedDate,
+    IsDisinformation = fact.IsDisinformation,
+    HopCount        = fact.HopCount + 1,
+    SourceHolder    = from,              // who is handing this to `to`
+};
+```
+
+When `KnowledgeSystem.IngestEvent` creates an original fact (the event just happened):
+
+```csharp
+var fact = new KnowledgeFact
+{
+    Claim          = ...,
+    Confidence     = baseConfidence,
+    BaseConfidence = baseConfidence,
+    HopCount       = 0,
+    SourceHolder   = null,   // directly witnessed — no intermediary
+};
+```
+
+### 8.4 Corroboration Logic in ShareFacts
+
+Before creating a new propagated fact for holder `to`, check the holder's existing facts:
+
+```
+subjectKey = GetSubjectKey(fact.Claim)
+existing = to's facts where SubjectKey == subjectKey && !IsSuperseded
+
+if existing is null:
+    create new propagated fact with SourceHolder = from
+
+elif existing.Claim == fact.Claim:
+    if existing.SourceHolder != from:
+        existing.CorroborationCount++      // independent confirmation
+    // same source → skip (retelling of the same chain)
+
+else:
+    // contradiction: different claim, same subject
+    create new propagated fact; flag both (IsContradicted — future)
+```
+
+This keeps the store clean: one active fact per subject per holder, with `CorroborationCount` summarising how many independent voices agree.
+
+### 8.5 Display (Console Harness)
+
+The `knowledge` command will show:
+
+```
+  [68%]  ShipLocation           (observed 1683-04-02)  hops:2  corr:1  src:PortHolder(nassau)
+  [35%]  IndividualWhereabouts  (observed 1683-03-15)  hops:0  corr:0  src:null (witnessed)
+```
+
+The `quests` command shows trigger facts with the same provenance summary so the player can gauge how credible the quest hook is.
+
+---
+
+## 9. Misinformation (Disinformation Injection)
 
 Factions with high `IntelligenceCapability` can **inject false facts** into the knowledge network.
 
@@ -466,7 +609,7 @@ Disinformation looks identical to legitimate facts from the receiver's perspecti
 
 ---
 
-## 9. KnowledgeSystem Tick
+## 10. KnowledgeSystem Tick
 
 `KnowledgeSystem` replaces `InformationPropagationSystem` in the tick pipeline. It runs last, after all other systems have mutated state and emitted events.
 
@@ -492,7 +635,7 @@ Tick phases:
 
 ---
 
-## 10. Revisions to Prior SDDs
+## 11. Revisions to Prior SDDs
 
 ### WorldState
 - Remove `KnownEvent` from `PlayerState.KnowledgeLog`
@@ -518,7 +661,7 @@ Tick phases:
 
 ---
 
-## 11. Open Questions
+## 12. Open Questions
 
 - [ ] Should the player see raw `Confidence` scores, or should the UI translate them into qualitative labels ("reliable tip", "old rumour", "unverified claim")?
 - [ ] Can the player run their own intelligence operation — e.g. hiring a spy network at a port to passively feed them facts?

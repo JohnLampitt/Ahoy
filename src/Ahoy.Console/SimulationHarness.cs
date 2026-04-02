@@ -327,7 +327,11 @@ public sealed class SimulationHarness
             {
                 System.Console.WriteLine("     Trigger facts:");
                 foreach (var f in q.TriggerFacts)
-                    System.Console.WriteLine($"       [{f.Confidence:P0}] {f.Claim.GetType().Name.Replace("Claim", "")}  hops:{f.HopCount}");
+                {
+                    var corr = f.CorroborationCount > 0 ? $"  corr:{f.CorroborationCount}" : "";
+                    var src = FormatSourceHolder(f.SourceHolder);
+                    System.Console.WriteLine($"       [{f.Confidence:P0}] {f.Claim.GetType().Name.Replace("Claim", ""),-22}  hops:{f.HopCount}{corr}  src:{src}");
+                }
             }
 
             System.Console.WriteLine("     Branches:");
@@ -377,7 +381,9 @@ public sealed class SimulationHarness
             var age = $"(observed {fact.ObservedDate})";
             var conf = $"[{fact.Confidence:P0}]";
             var claim = fact.Claim.GetType().Name.Replace("Claim", "");
-            System.Console.WriteLine($"  {conf,7}  {claim,-22}  {age}  hops:{fact.HopCount}");
+            var corr = fact.CorroborationCount > 0 ? $"  corr:{fact.CorroborationCount}" : "";
+            var src = FormatSourceHolder(fact.SourceHolder);
+            System.Console.WriteLine($"  {conf,7}  {claim,-22}  {age}  hops:{fact.HopCount}{corr}  src:{src}");
         }
     }
 
@@ -399,6 +405,20 @@ public sealed class SimulationHarness
         System.Console.WriteLine("    help          — this message");
         System.Console.WriteLine("    quit          — exit");
     }
+
+    private string FormatSourceHolder(Ahoy.Simulation.State.KnowledgeHolderId? holder) =>
+        holder switch
+        {
+            null => "witnessed",
+            Ahoy.Simulation.State.PortHolder ph =>
+                "port:" + (_engine.State.Ports.TryGetValue(ph.Port, out var p) ? p.Name : ph.Port.ToString()),
+            Ahoy.Simulation.State.ShipHolder sh =>
+                "ship:" + (_engine.State.Ships.TryGetValue(sh.Ship, out var s) ? s.Name : sh.Ship.ToString()),
+            Ahoy.Simulation.State.FactionHolder fh =>
+                "faction:" + (_engine.State.Factions.TryGetValue(fh.Faction, out var f) ? f.Name : fh.Faction.ToString()),
+            Ahoy.Simulation.State.PlayerHolder => "player",
+            _ => holder.GetType().Name,
+        };
 
     private static string ProsperityBar(float value)
     {

@@ -60,6 +60,28 @@ public sealed class KnowledgeFact
     /// </summary>
     public int? SupersededOnTick { get; set; }
 
+    // ---- Provenance ----
+
+    /// <summary>
+    /// The immediate entity that passed this copy of the fact to the current holder.
+    /// Null means the holder witnessed the underlying event directly (HopCount == 0).
+    /// Uses the same KnowledgeHolderId union as all other actors — the player is not
+    /// special-cased; a PlayerHolder source is valid when the player shares knowledge.
+    /// </summary>
+    public KnowledgeHolderId? SourceHolder { get; init; }
+
+    /// <summary>
+    /// Confidence at the moment this copy was created, before any per-tick decay.
+    /// Lets downstream consumers ask "how credible was this when I received it?"
+    /// </summary>
+    public float BaseConfidence { get; init; }
+
+    /// <summary>
+    /// Number of times the same claim has subsequently arrived from a different source.
+    /// Corroborating arrivals increment this instead of creating a duplicate fact.
+    /// </summary>
+    public int CorroborationCount { get; set; }
+
     /// <summary>
     /// Returns a canonical key identifying what this fact is about.
     /// Two facts with the same subject key held by the same holder supersede each other.

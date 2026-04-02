@@ -561,6 +561,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             Claim = new IndividualWhereaboutsClaim(id, portId),
             Sensitivity = KnowledgeSensitivity.Public,
             Confidence = rumourConfidence,
+            BaseConfidence = rumourConfidence,
             ObservedDate = state.Date,
             HopCount = 2,   // already travelled through a few hands
         };

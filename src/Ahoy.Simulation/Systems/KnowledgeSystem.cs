@@ -65,6 +65,7 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Claim = new PortPriceClaim(ps.PortId, ps.Good, ps.NewPrice),
                     Sensitivity = KnowledgeSensitivity.Public,
                     Confidence = baseConfidence,
+                    BaseConfidence = baseConfidence,
                     ObservedDate = ps.Date,
                 };
                 AddAndSupersede(state.Knowledge, new PortHolder(ps.PortId), priceFact, tick);
@@ -78,6 +79,7 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Claim = new PortProsperityClaim(pc.PortId, pc.NewValue),
                     Sensitivity = KnowledgeSensitivity.Public,
                     Confidence = baseConfidence,
+                    BaseConfidence = baseConfidence,
                     ObservedDate = pc.Date,
                 };
                 AddAndSupersede(state.Knowledge, new PortHolder(pc.PortId), prospFact, tick);
@@ -89,6 +91,7 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Claim = new PortControlClaim(capture.PortId, capture.NewFaction),
                     Sensitivity = KnowledgeSensitivity.Public,
                     Confidence = baseConfidence,
+                    BaseConfidence = baseConfidence,
                     ObservedDate = capture.Date,
                 };
                 AddAndSupersede(state.Knowledge, new PortHolder(capture.PortId), controlFact, tick);
@@ -104,6 +107,7 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Claim = new ShipLocationClaim(sa.ShipId, new AtPort(sa.PortId)),
                     Sensitivity = KnowledgeSensitivity.Public,
                     Confidence = baseConfidence,
+                    BaseConfidence = baseConfidence,
                     ObservedDate = sa.Date,
                 };
                 AddAndSupersede(state.Knowledge, new PortHolder(sa.PortId), shipLocFact, tick);
@@ -117,6 +121,7 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Claim = new WeatherClaim(sf.RegionId, Core.Enums.WindStrength.Gale, Core.Enums.StormPresence.Active),
                     Sensitivity = KnowledgeSensitivity.Public,
                     Confidence = baseConfidence,
+                    BaseConfidence = baseConfidence,
                     ObservedDate = sf.Date,
                 };
                 if (state.Regions.TryGetValue(sf.RegionId, out var stormRegion))
@@ -158,18 +163,37 @@ public sealed class KnowledgeSystem : IWorldSystem
             if (fact.IsSuperseded) continue;   // don't gossip stale beliefs
             if (_rng.NextDouble() > PropagationChance) continue;
 
-            var propagated = new KnowledgeFact
-            {
-                Claim = fact.Claim,
-                Sensitivity = fact.Sensitivity,
-                Confidence = Math.Max(0f, fact.Confidence - HopConfidencePenalty),
-                ObservedDate = fact.ObservedDate,
-                IsDisinformation = fact.IsDisinformation,
-                HopCount = fact.HopCount + 1,
-            };
+            var newConfidence = Math.Max(0f, fact.Confidence - HopConfidencePenalty);
+            if (newConfidence <= 0.10f) continue;
 
-            if (propagated.Confidence > 0.10f)
+            var subjectKey = KnowledgeFact.GetSubjectKey(fact.Claim);
+            var existing = state.Knowledge.GetFacts(to)
+                .FirstOrDefault(f => !f.IsSuperseded && KnowledgeFact.GetSubjectKey(f.Claim) == subjectKey);
+
+            if (existing is null)
+            {
+                // Holder does not yet know about this subject — create new propagated fact
+                var propagated = new KnowledgeFact
+                {
+                    Claim = fact.Claim,
+                    Sensitivity = fact.Sensitivity,
+                    Confidence = newConfidence,
+                    BaseConfidence = newConfidence,
+                    ObservedDate = fact.ObservedDate,
+                    IsDisinformation = fact.IsDisinformation,
+                    HopCount = fact.HopCount + 1,
+                    SourceHolder = from,
+                };
                 AddAndSupersede(state.Knowledge, to, propagated, tick);
+            }
+            else if (existing.Claim == fact.Claim)
+            {
+                // Same claim — corroboration if the source is different
+                if (!Equals(existing.SourceHolder, from))
+                    existing.CorroborationCount++;
+                // Same source retelling → skip (no new information)
+            }
+            // Different claim (contradiction) — leave both facts active; future work to flag
         }
     }
 

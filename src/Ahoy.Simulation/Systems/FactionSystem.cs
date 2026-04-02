@@ -235,9 +235,11 @@ public sealed class FactionSystem : IWorldSystem
             Claim = new ShipLocationClaim(baitShip.Id, new AtSea(baitRegion)),
             Sensitivity = KnowledgeSensitivity.Public,
             Confidence = confidence,
+            BaseConfidence = confidence,
             ObservedDate = state.Date,
             IsDisinformation = true,
             HopCount = 1,  // appears to have already spread once — more believable
+            SourceHolder = new FactionHolder(factionId),
         };
 
         // Seed into the haven's knowledge pool; it will propagate naturally from there
