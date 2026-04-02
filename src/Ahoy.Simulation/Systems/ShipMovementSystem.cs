@@ -70,6 +70,13 @@ public sealed class ShipMovementSystem : IWorldSystem
         // Player ship — only departs via PlayerCommand
         if (ship.IsPlayerShip) return;
 
+        // NPC ship at port with no destination — pick one
+        if (!ship.RoutingDestination.HasValue &&
+            state.Ports.TryGetValue(atPort.Port, out var currentPort2))
+        {
+            AssignNpcRoute(ship, currentPort2.RegionId, state);
+        }
+
         // NPC with a routing destination set — depart
         if (ship.RoutingDestination.HasValue &&
             state.Ports.TryGetValue(ship.RoutingDestination.Value, out var dest) &&

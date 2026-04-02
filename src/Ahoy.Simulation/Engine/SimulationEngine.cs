@@ -1,6 +1,7 @@
 using Ahoy.Core.Ids;
 using Ahoy.Simulation.Decisions;
 using Ahoy.Simulation.Events;
+using Ahoy.Simulation.Quests;
 using Ahoy.Simulation.State;
 using Ahoy.Simulation.Systems;
 
@@ -26,6 +27,9 @@ public sealed class SimulationEngine
 
     public WorldState State => _state;
 
+    /// <summary>Enqueue a player command to be applied at the start of the next tick.</summary>
+    public void EnqueueCommand(PlayerCommand command) => _commandQueue.Enqueue(command);
+
     private SimulationEngine(
         WorldState state,
         IPlayerCommandQueue commandQueue,
@@ -48,6 +52,7 @@ public sealed class SimulationEngine
         WorldState state,
         IPlayerCommandQueue? commandQueue = null,
         IAsyncActorDecisionProvider? llmProvider = null,
+        IReadOnlyList<QuestTemplate>? questTemplates = null,
         Random? rng = null)
     {
         rng ??= new Random();
@@ -59,12 +64,13 @@ public sealed class SimulationEngine
 
         var systems = new List<IWorldSystem>
         {
-            new WeatherSystem(rng),              // Step 1
-            new ShipMovementSystem(rng),         // Step 2
-            new EconomySystem(rng),              // Step 3
-            new FactionSystem(rng),              // Step 4
-            new EventPropagationSystem(emitter), // Step 5
-            new KnowledgeSystem(emitter, rng),   // Step 6
+            new WeatherSystem(rng),                                        // Step 1
+            new ShipMovementSystem(rng),                                   // Step 2
+            new EconomySystem(rng),                                        // Step 3
+            new FactionSystem(rng),                                        // Step 4
+            new EventPropagationSystem(emitter),                           // Step 5
+            new KnowledgeSystem(emitter, rng),                             // Step 6
+            new QuestSystem(questTemplates ?? Array.Empty<QuestTemplate>()), // Step 7
         };
 
         return new SimulationEngine(state, commandQueue, emitter, systems, decisionQueue);
@@ -184,6 +190,21 @@ public sealed class SimulationEngine
                             Core.Enums.SimulationLod.Local);
                     }
                 }
+                break;
+
+            case ChooseQuestBranchCommand qb:
+                var quest = _state.Quests.ActiveQuests
+                    .FirstOrDefault(q => q.Id == qb.QuestInstanceId);
+                if (quest is null) break;
+                var branch = quest.Template.Branches
+                    .FirstOrDefault(b => b.BranchId == qb.BranchId);
+                if (branch is null) break;
+                quest.ChosenBranch = branch;
+                quest.Status       = QuestStatus.Completed;
+                quest.ResolvedDate = _state.Date;
+                foreach (var ev in branch.OutcomeEvents(_state))
+                    _emitter.Emit(ev, ev.SourceLod);
+                _state.Quests.Resolve(quest);
                 break;
         }
     }

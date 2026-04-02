@@ -49,6 +49,29 @@ public sealed class KnowledgeFact
 
     /// <summary>Number of hops this fact has propagated from its origin.</summary>
     public int HopCount { get; set; }
+
+    /// <summary>True when a newer fact about the same subject has superseded this one.</summary>
+    public bool IsSuperseded { get; set; }
+
+    /// <summary>
+    /// Returns a canonical key identifying what this fact is about.
+    /// Two facts with the same subject key held by the same holder supersede each other.
+    /// </summary>
+    public static string GetSubjectKey(KnowledgeClaim claim) => claim switch
+    {
+        PortPriceClaim c           => $"PortPrice:{c.Port.Value}:{c.Good}",
+        PortProsperityClaim c      => $"PortProsperity:{c.Port.Value}",
+        PortControlClaim c         => $"PortControl:{c.Port.Value}",
+        ShipLocationClaim c        => $"ShipLocation:{c.Ship.Value}",
+        ShipCargoClaim c           => $"ShipCargo:{c.Ship.Value}",
+        FactionStrengthClaim c     => $"FactionStrength:{c.Faction.Value}",
+        FactionIntentionClaim c    => $"FactionIntention:{c.Faction.Value}",
+        WeatherClaim c             => $"Weather:{c.Region.Value}",
+        RouteHazardClaim c         => $"RouteHazard:{c.From.Value}:{c.To.Value}",
+        IndividualWhereaboutsClaim c => $"IndividualWhereabouts:{c.Individual.Value}",
+        CustomClaim c              => $"Custom:{c.Subject}",
+        _                          => claim.GetType().Name,
+    };
 }
 
 // ---- KnowledgeStore ----
@@ -73,11 +96,27 @@ public sealed class KnowledgeStore
     public IReadOnlyList<KnowledgeFact> GetAllFacts()
         => _store.Values.SelectMany(x => x).ToList();
 
-    /// <summary>Remove facts with confidence below the threshold.</summary>
+    /// <summary>
+    /// Marks all existing facts for this holder that share the same subject key
+    /// as the incoming fact as superseded. Call before AddFact.
+    /// </summary>
+    public void MarkSuperseded(KnowledgeHolderId holder, KnowledgeFact incoming)
+    {
+        if (!_store.TryGetValue(holder, out var list)) return;
+        var subjectKey = KnowledgeFact.GetSubjectKey(incoming.Claim);
+        foreach (var existing in list)
+        {
+            if (existing.Id == incoming.Id) continue;
+            if (!existing.IsSuperseded && KnowledgeFact.GetSubjectKey(existing.Claim) == subjectKey)
+                existing.IsSuperseded = true;
+        }
+    }
+
+    /// <summary>Remove facts with confidence below threshold or that have been superseded.</summary>
     public void PruneExpired(float minimumConfidence = 0.05f)
     {
         foreach (var list in _store.Values)
-            list.RemoveAll(f => f.Confidence < minimumConfidence);
+            list.RemoveAll(f => f.Confidence < minimumConfidence || f.IsSuperseded);
     }
 
     /// <summary>

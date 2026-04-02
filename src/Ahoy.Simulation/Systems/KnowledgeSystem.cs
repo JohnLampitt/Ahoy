@@ -66,11 +66,9 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Confidence = baseConfidence,
                     ObservedDate = ps.Date,
                 };
-                // Fact held by the port itself
-                state.Knowledge.AddFact(new PortHolder(ps.PortId), priceFact);
-                // Player gets it if Local
+                AddAndSupersede(state.Knowledge, new PortHolder(ps.PortId), priceFact);
                 if (worldEvent.SourceLod == SimulationLod.Local)
-                    state.Knowledge.AddFact(new PlayerHolder(), priceFact);
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), priceFact);
                 break;
 
             case PortProsperityChanged pc:
@@ -81,7 +79,7 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Confidence = baseConfidence,
                     ObservedDate = pc.Date,
                 };
-                state.Knowledge.AddFact(new PortHolder(pc.PortId), prospFact);
+                AddAndSupersede(state.Knowledge, new PortHolder(pc.PortId), prospFact);
                 break;
 
             case PortCaptured capture:
@@ -92,15 +90,14 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Confidence = baseConfidence,
                     ObservedDate = capture.Date,
                 };
-                state.Knowledge.AddFact(new PortHolder(capture.PortId), controlFact);
-                state.Knowledge.AddFact(new FactionHolder(capture.NewFaction), controlFact);
+                AddAndSupersede(state.Knowledge, new PortHolder(capture.PortId), controlFact);
+                AddAndSupersede(state.Knowledge, new FactionHolder(capture.NewFaction), controlFact);
                 if (worldEvent.SourceLod == SimulationLod.Local)
-                    state.Knowledge.AddFact(new PlayerHolder(), controlFact);
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), controlFact);
                 break;
 
             case ShipArrived sa:
-                // Record ship location — the port and any observers learn where this ship is
-                if (!state.Ships.TryGetValue(sa.ShipId, out var arrivedShip)) break;
+                if (!state.Ships.TryGetValue(sa.ShipId, out _)) break;
                 var shipLocFact = new KnowledgeFact
                 {
                     Claim = new ShipLocationClaim(sa.ShipId, new AtPort(sa.PortId)),
@@ -108,9 +105,9 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Confidence = baseConfidence,
                     ObservedDate = sa.Date,
                 };
-                state.Knowledge.AddFact(new PortHolder(sa.PortId), shipLocFact);
+                AddAndSupersede(state.Knowledge, new PortHolder(sa.PortId), shipLocFact);
                 if (worldEvent.SourceLod == SimulationLod.Local)
-                    state.Knowledge.AddFact(new PlayerHolder(), shipLocFact);
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), shipLocFact);
                 break;
 
             case StormFormed sf:
@@ -123,11 +120,17 @@ public sealed class KnowledgeSystem : IWorldSystem
                 };
                 if (state.Regions.TryGetValue(sf.RegionId, out var stormRegion))
                     foreach (var portId in stormRegion.Ports)
-                        state.Knowledge.AddFact(new PortHolder(portId), weatherFact);
+                        AddAndSupersede(state.Knowledge, new PortHolder(portId), weatherFact);
                 if (worldEvent.SourceLod == SimulationLod.Local)
-                    state.Knowledge.AddFact(new PlayerHolder(), weatherFact);
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), weatherFact);
                 break;
         }
+    }
+
+    private static void AddAndSupersede(KnowledgeStore store, KnowledgeHolderId holder, KnowledgeFact fact)
+    {
+        store.MarkSuperseded(holder, fact);
+        store.AddFact(holder, fact);
     }
 
     // ---- Propagation via ship arrivals ----
@@ -169,7 +172,7 @@ public sealed class KnowledgeSystem : IWorldSystem
 
             // Only propagate if degraded confidence is still meaningful
             if (propagated.Confidence > 0.10f)
-                state.Knowledge.AddFact(to, propagated);
+                AddAndSupersede(state.Knowledge, to, propagated);
         }
     }
 

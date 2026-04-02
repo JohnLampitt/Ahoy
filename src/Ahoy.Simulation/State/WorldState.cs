@@ -24,6 +24,7 @@ public sealed class WorldState
 
     // ---- Cross-cutting systems ----
     public KnowledgeStore Knowledge { get; } = new();
+    public Quests.QuestStore Quests  { get; } = new();
     public Dictionary<RegionId, RegionWeather> Weather { get; } = new();
 
     // ---- Cross-tick communication ----

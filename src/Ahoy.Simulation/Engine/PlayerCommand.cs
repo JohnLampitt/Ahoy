@@ -33,6 +33,12 @@ public record ProvideintelCommand(
 public record BuyKnowledgeCommand(
     IndividualId BrokerId, Core.Ids.KnowledgeFactId FactId, int Price) : PlayerCommand;
 
+// ---- Quests ----
+
+public record ChooseQuestBranchCommand(
+    Quests.QuestInstanceId QuestInstanceId,
+    string BranchId) : PlayerCommand;
+
 // ---- Actor decisions ----
 
 public record IntervedeInDecisionCommand(

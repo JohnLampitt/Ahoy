@@ -81,6 +81,15 @@ public sealed class SimulationHarness
                     PrintPlayerKnowledge();
                     break;
 
+                case "quests":
+                    PrintQuests();
+                    break;
+
+                case "choose" when parts.Length == 3:
+                    // choose <questPrefix> <branchId>
+                    ChooseBranch(parts[1], parts[2]);
+                    break;
+
                 case "help":
                     PrintHelp();
                     break;
@@ -121,7 +130,7 @@ public sealed class SimulationHarness
         if (!verbose) System.Console.WriteLine();
     }
 
-    private static void PrintTickEvents(IReadOnlyList<WorldEvent> events)
+    private void PrintTickEvents(IReadOnlyList<WorldEvent> events)
     {
         if (events.Count == 0)
         {
@@ -145,20 +154,20 @@ public sealed class SimulationHarness
 
             var desc = ev switch
             {
-                ShipArrived sa             => $"Ship arrived at port",
-                ShipDeparted sd            => $"Ship departed port",
-                StormFormed sf             => $"⛈  Storm formed in region",
-                StormDissipated            => $"☀  Storm dissipated",
-                StormPropagated sp         => $"⛈  Storm spread to adjacent region",
+                ShipArrived sa             => $"🚢 {PortName(sa.PortId)}: {ShipName(sa.ShipId)} arrived",
+                ShipDeparted sdep          => $"🚢 {PortName(sdep.FromPort)}: {ShipName(sdep.ShipId)} departed",
+                StormFormed sf             => $"⛈  Storm formed in {RegionName(sf.RegionId)}",
+                StormDissipated sdis       => $"☀  Storm dissipated in {RegionName(sdis.RegionId)}",
+                StormPropagated sp         => $"⛈  Storm spread to {RegionName(sp.ToRegion)}",
                 WindShifted ws             => $"💨 Wind shifted → {ws.NewDirection} {ws.NewStrength}",
                 TradeCompleted tc          => tc.IsBuying
                     ? $"📦 Merchant bought {tc.Quantity}t {tc.Good} @ {tc.PricePerUnit}g"
                     : $"📦 Merchant sold  {tc.Quantity}t {tc.Good} @ {tc.PricePerUnit}g",
-                PriceShifted ps            => $"💰 {ps.Good} price at {ps.PortId}: {ps.OldPrice}→{ps.NewPrice}g",
-                PortProsperityChanged pc   => $"{FormatProsperityChange(pc.OldValue, pc.NewValue)} Port prosperity {pc.OldValue:F0}→{pc.NewValue:F0}",
-                FactionRelationshipChanged => $"🤝 Faction relationship changed",
-                PortCaptured cap           => $"⚔  Port captured!",
-                ShipDestroyed              => $"💥 Ship destroyed",
+                PriceShifted ps            => $"💰 {PortName(ps.PortId)}: {ps.Good} {ps.OldPrice}→{ps.NewPrice}g",
+                PortProsperityChanged pc   => $"{FormatProsperityChange(pc.OldValue, pc.NewValue)} {PortName(pc.PortId)} prosperity {pc.OldValue:F0}→{pc.NewValue:F0}",
+                FactionRelationshipChanged frc => $"🤝 {FactionName(frc.FactionA)} ↔ {FactionName(frc.FactionB)} relationship changed",
+                PortCaptured cap           => $"⚔  {PortName(cap.PortId)} captured by {FactionName(cap.NewFaction)}!",
+                ShipDestroyed sdes         => $"💥 {ShipName(sdes.ShipId)} destroyed",
                 _                          => null,   // suppress other noise
             };
 
@@ -167,6 +176,18 @@ public sealed class SimulationHarness
             System.Console.WriteLine($"{prefix}{desc}");
         }
     }
+
+    private string PortName(Ahoy.Core.Ids.PortId id) =>
+        _engine.State.Ports.TryGetValue(id, out var p) ? p.Name : id.ToString();
+
+    private string ShipName(Ahoy.Core.Ids.ShipId id) =>
+        _engine.State.Ships.TryGetValue(id, out var s) ? s.Name : id.ToString();
+
+    private string FactionName(Ahoy.Core.Ids.FactionId id) =>
+        _engine.State.Factions.TryGetValue(id, out var f) ? f.Name : id.ToString();
+
+    private string RegionName(Ahoy.Core.Ids.RegionId id) =>
+        _engine.State.Regions.TryGetValue(id, out var r) ? r.Name : id.ToString();
 
     private static string FormatProsperityChange(float old, float next) =>
         next > old ? "▲" : "▼";
@@ -267,6 +288,63 @@ public sealed class SimulationHarness
         }
     }
 
+    private void PrintQuests()
+    {
+        var active = _engine.State.Quests.ActiveQuests;
+        System.Console.WriteLine();
+
+        if (active.Count == 0)
+        {
+            System.Console.WriteLine("  No active quests.");
+            return;
+        }
+
+        System.Console.WriteLine($"  Active quests: {active.Count}");
+
+        foreach (var q in active)
+        {
+            System.Console.WriteLine();
+            System.Console.WriteLine($"  ── {q.Template.Title}  [{q.Id}]");
+            System.Console.WriteLine($"     {q.DisplayDialogue}");
+            System.Console.WriteLine($"     NPC: {q.DisplayNpcName}   Activated: {q.ActivatedDate}");
+
+            if (q.TriggerFacts.Count > 0)
+            {
+                System.Console.WriteLine("     Trigger facts:");
+                foreach (var f in q.TriggerFacts)
+                    System.Console.WriteLine($"       [{f.Confidence:P0}] {f.Claim.GetType().Name.Replace("Claim", "")}  hops:{f.HopCount}");
+            }
+
+            System.Console.WriteLine("     Branches:");
+            foreach (var b in q.Template.Branches)
+                System.Console.WriteLine($"       choose {q.Id} {b.BranchId,-18}  {b.Label}");
+        }
+    }
+
+    private void ChooseBranch(string questPrefix, string branchId)
+    {
+        var quest = _engine.State.Quests.ActiveQuests
+            .FirstOrDefault(q => q.Id.ToString().Contains(questPrefix, StringComparison.OrdinalIgnoreCase));
+
+        if (quest is null)
+        {
+            System.Console.WriteLine($"  No active quest matching '{questPrefix}'.");
+            return;
+        }
+
+        var branch = quest.Template.Branches.FirstOrDefault(b =>
+            b.BranchId.Equals(branchId, StringComparison.OrdinalIgnoreCase));
+
+        if (branch is null)
+        {
+            System.Console.WriteLine($"  Unknown branch '{branchId}' for quest '{quest.Template.Title}'.");
+            return;
+        }
+
+        _engine.EnqueueCommand(new Ahoy.Simulation.Engine.ChooseQuestBranchCommand(quest.Id, branch.BranchId));
+        System.Console.WriteLine($"  Choice queued — '{branch.Label}' will resolve next tick.");
+    }
+
     private void PrintPlayerKnowledge()
     {
         var s = _engine.State;
@@ -296,6 +374,8 @@ public sealed class SimulationHarness
         System.Console.WriteLine("    ships         — all ship positions");
         System.Console.WriteLine("    weather       — weather by region");
         System.Console.WriteLine("    knowledge     — player's current knowledge facts");
+        System.Console.WriteLine("    quests        — active quests and branches");
+        System.Console.WriteLine("    choose <id> <branch> — choose a quest branch (resolves next tick)");
         System.Console.WriteLine("    help          — this message");
         System.Console.WriteLine("    quit          — exit");
     }
