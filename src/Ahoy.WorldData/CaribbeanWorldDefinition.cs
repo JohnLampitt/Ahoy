@@ -552,6 +552,20 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         state.Individuals[id] = ind;
         if (state.Ports.TryGetValue(portId, out var port))
             port.GovernorId = id;
+
+        // Seed a low-confidence whereabouts rumour in player knowledge (tavern-grade: 0.25–0.35).
+        // This is below the 0.40 threshold that triggers Quest A3 (The Governor's Quill).
+        var rumourConfidence = 0.25f + (float)rng.NextDouble() * 0.10f;
+        var whereaboutsFact = new KnowledgeFact
+        {
+            Claim = new IndividualWhereaboutsClaim(id, portId),
+            Sensitivity = KnowledgeSensitivity.Public,
+            Confidence = rumourConfidence,
+            ObservedDate = state.Date,
+            HopCount = 2,   // already travelled through a few hands
+        };
+        state.Knowledge.AddFact(new PortHolder(portId), whereaboutsFact);
+        state.Knowledge.AddFact(new PlayerHolder(), whereaboutsFact);
     }
 
     private static void AddPirate(WorldState state, Random rng,

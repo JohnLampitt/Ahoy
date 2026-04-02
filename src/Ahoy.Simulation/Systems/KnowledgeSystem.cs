@@ -35,24 +35,25 @@ public sealed class KnowledgeSystem : IWorldSystem
     public void Tick(WorldState state, SimulationContext context, IEventEmitter events)
     {
         var allEvents = _emitter.PeekAll();
+        var tick = context.TickNumber;
 
         // 1. Convert events to facts held by appropriate parties
         foreach (var worldEvent in allEvents)
-            IngestEvent(worldEvent, state, context);
+            IngestEvent(worldEvent, state, context, tick);
 
         // 2. Propagate facts via ships arriving in port this tick
-        PropagateViaArrivingShips(state, context);
+        PropagateViaArrivingShips(state, context, tick);
 
         // 3. Degrade confidence on all existing facts
         DegradeConfidence(state);
 
-        // 4. Prune expired facts
-        state.Knowledge.PruneExpired();
+        // 4. Prune expired facts (keep superseded for one tick)
+        state.Knowledge.PruneExpired(tick);
     }
 
     // ---- Event ingestion ----
 
-    private static void IngestEvent(WorldEvent worldEvent, WorldState state, SimulationContext context)
+    private static void IngestEvent(WorldEvent worldEvent, WorldState state, SimulationContext context, int tick)
     {
         var baseConfidence = LodToConfidence(worldEvent.SourceLod);
 
@@ -66,9 +67,9 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Confidence = baseConfidence,
                     ObservedDate = ps.Date,
                 };
-                AddAndSupersede(state.Knowledge, new PortHolder(ps.PortId), priceFact);
+                AddAndSupersede(state.Knowledge, new PortHolder(ps.PortId), priceFact, tick);
                 if (worldEvent.SourceLod == SimulationLod.Local)
-                    AddAndSupersede(state.Knowledge, new PlayerHolder(), priceFact);
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), priceFact, tick);
                 break;
 
             case PortProsperityChanged pc:
@@ -79,7 +80,7 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Confidence = baseConfidence,
                     ObservedDate = pc.Date,
                 };
-                AddAndSupersede(state.Knowledge, new PortHolder(pc.PortId), prospFact);
+                AddAndSupersede(state.Knowledge, new PortHolder(pc.PortId), prospFact, tick);
                 break;
 
             case PortCaptured capture:
@@ -90,10 +91,10 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Confidence = baseConfidence,
                     ObservedDate = capture.Date,
                 };
-                AddAndSupersede(state.Knowledge, new PortHolder(capture.PortId), controlFact);
-                AddAndSupersede(state.Knowledge, new FactionHolder(capture.NewFaction), controlFact);
+                AddAndSupersede(state.Knowledge, new PortHolder(capture.PortId), controlFact, tick);
+                AddAndSupersede(state.Knowledge, new FactionHolder(capture.NewFaction), controlFact, tick);
                 if (worldEvent.SourceLod == SimulationLod.Local)
-                    AddAndSupersede(state.Knowledge, new PlayerHolder(), controlFact);
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), controlFact, tick);
                 break;
 
             case ShipArrived sa:
@@ -105,9 +106,9 @@ public sealed class KnowledgeSystem : IWorldSystem
                     Confidence = baseConfidence,
                     ObservedDate = sa.Date,
                 };
-                AddAndSupersede(state.Knowledge, new PortHolder(sa.PortId), shipLocFact);
+                AddAndSupersede(state.Knowledge, new PortHolder(sa.PortId), shipLocFact, tick);
                 if (worldEvent.SourceLod == SimulationLod.Local)
-                    AddAndSupersede(state.Knowledge, new PlayerHolder(), shipLocFact);
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), shipLocFact, tick);
                 break;
 
             case StormFormed sf:
@@ -120,22 +121,22 @@ public sealed class KnowledgeSystem : IWorldSystem
                 };
                 if (state.Regions.TryGetValue(sf.RegionId, out var stormRegion))
                     foreach (var portId in stormRegion.Ports)
-                        AddAndSupersede(state.Knowledge, new PortHolder(portId), weatherFact);
+                        AddAndSupersede(state.Knowledge, new PortHolder(portId), weatherFact, tick);
                 if (worldEvent.SourceLod == SimulationLod.Local)
-                    AddAndSupersede(state.Knowledge, new PlayerHolder(), weatherFact);
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), weatherFact, tick);
                 break;
         }
     }
 
-    private static void AddAndSupersede(KnowledgeStore store, KnowledgeHolderId holder, KnowledgeFact fact)
+    private static void AddAndSupersede(KnowledgeStore store, KnowledgeHolderId holder, KnowledgeFact fact, int tick)
     {
-        store.MarkSuperseded(holder, fact);
+        store.MarkSuperseded(holder, fact, tick);
         store.AddFact(holder, fact);
     }
 
     // ---- Propagation via ship arrivals ----
 
-    private void PropagateViaArrivingShips(WorldState state, SimulationContext context)
+    private void PropagateViaArrivingShips(WorldState state, SimulationContext context, int tick)
     {
         foreach (var ship in state.Ships.Values.Where(s => s.ArrivedThisTick))
         {
@@ -144,20 +145,17 @@ public sealed class KnowledgeSystem : IWorldSystem
             var shipHolder = new ShipHolder(ship.Id);
             var portHolder = new PortHolder(atPort.Port);
 
-            // Ship gossips its knowledge to the port
-            ShareFacts(shipHolder, portHolder, state, ship.Id.ToString());
-
-            // Port gossips back to the ship
-            ShareFacts(portHolder, shipHolder, state, atPort.Port.ToString());
+            ShareFacts(shipHolder, portHolder, state, tick);
+            ShareFacts(portHolder, shipHolder, state, tick);
         }
     }
 
-    private void ShareFacts(KnowledgeHolderId from, KnowledgeHolderId to,
-        WorldState state, string contextId)
+    private void ShareFacts(KnowledgeHolderId from, KnowledgeHolderId to, WorldState state, int tick)
     {
         var sourceFacts = state.Knowledge.GetFacts(from);
         foreach (var fact in sourceFacts)
         {
+            if (fact.IsSuperseded) continue;   // don't gossip stale beliefs
             if (_rng.NextDouble() > PropagationChance) continue;
 
             var propagated = new KnowledgeFact
@@ -170,9 +168,8 @@ public sealed class KnowledgeSystem : IWorldSystem
                 HopCount = fact.HopCount + 1,
             };
 
-            // Only propagate if degraded confidence is still meaningful
             if (propagated.Confidence > 0.10f)
-                AddAndSupersede(state.Knowledge, to, propagated);
+                AddAndSupersede(state.Knowledge, to, propagated, tick);
         }
     }
 

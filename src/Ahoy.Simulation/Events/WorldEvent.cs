@@ -112,3 +112,16 @@ public record RumourSpread(
 public record IndividualDied(
     WorldDate Date, SimulationLod SourceLod,
     IndividualId IndividualId, string Cause) : WorldEvent(Date, SourceLod);
+
+// ---- Quest events ----
+
+public record QuestActivated(
+    WorldDate Date, SimulationLod SourceLod,
+    string QuestTemplateId, string QuestInstanceId,
+    string Title) : WorldEvent(Date, SourceLod);
+
+public record QuestResolved(
+    WorldDate Date, SimulationLod SourceLod,
+    string QuestTemplateId, string QuestInstanceId,
+    string Title, Quests.QuestStatus Status,
+    string? ChosenBranchId) : WorldEvent(Date, SourceLod);

@@ -86,8 +86,19 @@ public sealed class SimulationHarness
                     break;
 
                 case "choose" when parts.Length == 3:
-                    // choose <questPrefix> <branchId>
+                    // choose <n|questPrefix> <branchId>
                     ChooseBranch(parts[1], parts[2]);
+                    break;
+
+                case "choose" when parts.Length == 2:
+                    // choose <branchId>  — shorthand when only one quest is active
+                    var onlyQuest = _engine.State.Quests.ActiveQuests;
+                    if (onlyQuest.Count == 1)
+                        ChooseBranch(onlyQuest[0].Id.ToString(), parts[1]);
+                    else if (onlyQuest.Count == 0)
+                        System.Console.WriteLine("  No active quests.");
+                    else
+                        System.Console.WriteLine("  Multiple active quests — use: choose <n> <branch>  (n = 1, 2, ...)");
                     break;
 
                 case "help":
@@ -168,6 +179,10 @@ public sealed class SimulationHarness
                 FactionRelationshipChanged frc => $"🤝 {FactionName(frc.FactionA)} ↔ {FactionName(frc.FactionB)} relationship changed",
                 PortCaptured cap           => $"⚔  {PortName(cap.PortId)} captured by {FactionName(cap.NewFaction)}!",
                 ShipDestroyed sdes         => $"💥 {ShipName(sdes.ShipId)} destroyed",
+                QuestActivated qa          => $"📜 Quest available: {qa.Title}",
+                QuestResolved qr           => qr.Status == Ahoy.Simulation.Quests.QuestStatus.Completed
+                    ? $"📜 Quest resolved ({qr.ChosenBranchId}): {qr.Title}"
+                    : $"📜 Quest expired: {qr.Title}",
                 _                          => null,   // suppress other noise
             };
 
@@ -301,10 +316,10 @@ public sealed class SimulationHarness
 
         System.Console.WriteLine($"  Active quests: {active.Count}");
 
-        foreach (var q in active)
+        foreach (var (q, i) in active.Select((q, i) => (q, i + 1)))
         {
             System.Console.WriteLine();
-            System.Console.WriteLine($"  ── {q.Template.Title}  [{q.Id}]");
+            System.Console.WriteLine($"  [{i}] {q.Template.Title}  ({q.Id})");
             System.Console.WriteLine($"     {q.DisplayDialogue}");
             System.Console.WriteLine($"     NPC: {q.DisplayNpcName}   Activated: {q.ActivatedDate}");
 
@@ -323,8 +338,12 @@ public sealed class SimulationHarness
 
     private void ChooseBranch(string questPrefix, string branchId)
     {
-        var quest = _engine.State.Quests.ActiveQuests
-            .FirstOrDefault(q => q.Id.ToString().Contains(questPrefix, StringComparison.OrdinalIgnoreCase));
+        var active = _engine.State.Quests.ActiveQuests;
+
+        // Numeric index: "1" = first active quest, "2" = second, etc.
+        var quest = int.TryParse(questPrefix, out var idx) && idx >= 1 && idx <= active.Count
+            ? active[idx - 1]
+            : active.FirstOrDefault(q => q.Id.ToString().Contains(questPrefix, StringComparison.OrdinalIgnoreCase));
 
         if (quest is null)
         {
@@ -375,7 +394,8 @@ public sealed class SimulationHarness
         System.Console.WriteLine("    weather       — weather by region");
         System.Console.WriteLine("    knowledge     — player's current knowledge facts");
         System.Console.WriteLine("    quests        — active quests and branches");
-        System.Console.WriteLine("    choose <id> <branch> — choose a quest branch (resolves next tick)");
+        System.Console.WriteLine("    choose <branch>      — choose branch (when one quest active)");
+        System.Console.WriteLine("    choose <n> <branch>  — choose branch of quest n (1, 2, ...)");
         System.Console.WriteLine("    help          — this message");
         System.Console.WriteLine("    quit          — exit");
     }

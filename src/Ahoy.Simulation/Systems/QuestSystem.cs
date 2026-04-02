@@ -1,4 +1,6 @@
+using Ahoy.Core.Enums;
 using Ahoy.Simulation.Engine;
+using Ahoy.Simulation.Events;
 using Ahoy.Simulation.Quests;
 using Ahoy.Simulation.State;
 
@@ -35,6 +37,11 @@ public sealed class QuestSystem : IWorldSystem
                 instance.Status = QuestStatus.Expired;
                 instance.ResolvedDate = state.Date;
                 state.Quests.Resolve(instance);
+                events.Emit(new QuestResolved(
+                    state.Date, SimulationLod.Local,
+                    instance.Template.Id.Value, instance.Id.ToString(),
+                    instance.Template.Title, QuestStatus.Expired, null),
+                    SimulationLod.Local);
             }
         }
 
@@ -48,12 +55,18 @@ public sealed class QuestSystem : IWorldSystem
                 continue;
 
             var triggerFacts = template.TriggerFactSelector(playerFacts);
-            state.Quests.AddActive(new QuestInstance
+            var instance = new QuestInstance
             {
-                Template     = template,
+                Template      = template,
                 ActivatedDate = state.Date,
                 TriggerFacts  = triggerFacts,
-            });
+            };
+            state.Quests.AddActive(instance);
+            events.Emit(new QuestActivated(
+                state.Date, SimulationLod.Local,
+                template.Id.Value, instance.Id.ToString(),
+                template.Title),
+                SimulationLod.Local);
         }
     }
 

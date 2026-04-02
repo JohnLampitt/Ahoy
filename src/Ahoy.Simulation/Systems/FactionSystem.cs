@@ -1,5 +1,6 @@
 using Ahoy.Core.Enums;
 using Ahoy.Core.Ids;
+using Ahoy.Core.ValueObjects;
 using Ahoy.Simulation.Engine;
 using Ahoy.Simulation.Events;
 using Ahoy.Simulation.State;
@@ -57,6 +58,9 @@ public sealed class FactionSystem : IWorldSystem
     private void TickColonial(Faction faction, FactionId factionId, WorldState state,
         IEventEmitter events, SimulationContext context)
     {
+        // ~1% chance per tick: plant disinformation in a pirate haven's knowledge pool
+        if (_rng.NextDouble() < 0.01)
+            SeedDisinformation(faction, factionId, state, context);
         // Income: port taxes + trade duties (derived from port prosperity)
         var portIncome = state.Ports.Values
             .Where(p => p.ControllingFactionId == factionId)
@@ -194,6 +198,51 @@ public sealed class FactionSystem : IWorldSystem
         }
 
         return goals;
+    }
+
+    /// <summary>
+    /// Plant a false ShipLocationClaim in a pirate haven's knowledge pool.
+    /// The false fact has high confidence and IsDisinformation=true — holders believe it is genuine.
+    /// This models factions luring enemies into traps with planted rumours (e.g. the Q-ship bait from Quest A1).
+    /// </summary>
+    private void SeedDisinformation(Faction faction, FactionId factionId, WorldState state,
+        SimulationContext context)
+    {
+        // Pick a pirate haven to seed the rumour into
+        var havens = state.Ports.Values.Where(p => p.IsPirateHaven).ToList();
+        if (havens.Count == 0) return;
+        var targetPort = havens[_rng.Next(havens.Count)];
+
+        // Pick one of this faction's own ships as the "bait"
+        var baitShip = state.Ships.Values
+            .FirstOrDefault(s => s.OwnerFactionId == factionId && !s.IsPlayerShip);
+        if (baitShip is null) return;
+
+        // Place the false location in an adjacent region to make it actionable
+        var targetRegion = state.Ports.TryGetValue(targetPort.Id, out var tp)
+            ? tp.RegionId : default;
+        var adjacentRegions = state.Regions.TryGetValue(targetRegion, out var reg)
+            ? reg.AdjacentRegions : [];
+        var baitRegion = adjacentRegions.Count > 0
+            ? adjacentRegions[_rng.Next(adjacentRegions.Count)]
+            : targetRegion;
+
+        // High confidence (0.75–0.90) makes it credible enough to trigger Quest A1
+        var confidence = 0.75f + (float)_rng.NextDouble() * 0.15f;
+
+        var falseFact = new KnowledgeFact
+        {
+            Claim = new ShipLocationClaim(baitShip.Id, new AtSea(baitRegion)),
+            Sensitivity = KnowledgeSensitivity.Public,
+            Confidence = confidence,
+            ObservedDate = state.Date,
+            IsDisinformation = true,
+            HopCount = 1,  // appears to have already spread once — more believable
+        };
+
+        // Seed into the haven's knowledge pool; it will propagate naturally from there
+        state.Knowledge.MarkSuperseded(new PortHolder(targetPort.Id), falseFact, context.TickNumber);
+        state.Knowledge.AddFact(new PortHolder(targetPort.Id), falseFact);
     }
 
     private static void TickRelationshipDecay(Faction faction)

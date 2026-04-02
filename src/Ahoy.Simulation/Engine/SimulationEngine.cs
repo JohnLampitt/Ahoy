@@ -204,6 +204,11 @@ public sealed class SimulationEngine
                 quest.ResolvedDate = _state.Date;
                 foreach (var ev in branch.OutcomeEvents(_state))
                     _emitter.Emit(ev, ev.SourceLod);
+                _emitter.Emit(new QuestResolved(
+                    _state.Date, Core.Enums.SimulationLod.Local,
+                    quest.Template.Id.Value, quest.Id.ToString(),
+                    quest.Template.Title, QuestStatus.Completed, branch.BranchId),
+                    Core.Enums.SimulationLod.Local);
                 _state.Quests.Resolve(quest);
                 break;
         }

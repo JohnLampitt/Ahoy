@@ -54,6 +54,13 @@ public sealed class KnowledgeFact
     public bool IsSuperseded { get; set; }
 
     /// <summary>
+    /// Set to the tick number on which this fact was superseded.
+    /// Superseded facts are kept for one full tick so other systems (e.g. LLM context)
+    /// can read "what the player used to believe" before it is pruned.
+    /// </summary>
+    public int? SupersededOnTick { get; set; }
+
+    /// <summary>
     /// Returns a canonical key identifying what this fact is about.
     /// Two facts with the same subject key held by the same holder supersede each other.
     /// </summary>
@@ -98,9 +105,10 @@ public sealed class KnowledgeStore
 
     /// <summary>
     /// Marks all existing facts for this holder that share the same subject key
-    /// as the incoming fact as superseded. Call before AddFact.
+    /// as the incoming fact as superseded on the given tick. Call before AddFact.
+    /// Superseded facts are retained until the following tick's prune pass.
     /// </summary>
-    public void MarkSuperseded(KnowledgeHolderId holder, KnowledgeFact incoming)
+    public void MarkSuperseded(KnowledgeHolderId holder, KnowledgeFact incoming, int currentTick)
     {
         if (!_store.TryGetValue(holder, out var list)) return;
         var subjectKey = KnowledgeFact.GetSubjectKey(incoming.Claim);
@@ -108,15 +116,23 @@ public sealed class KnowledgeStore
         {
             if (existing.Id == incoming.Id) continue;
             if (!existing.IsSuperseded && KnowledgeFact.GetSubjectKey(existing.Claim) == subjectKey)
+            {
                 existing.IsSuperseded = true;
+                existing.SupersededOnTick = currentTick;
+            }
         }
     }
 
-    /// <summary>Remove facts with confidence below threshold or that have been superseded.</summary>
-    public void PruneExpired(float minimumConfidence = 0.05f)
+    /// <summary>
+    /// Remove facts with confidence below threshold, or superseded facts from a previous tick.
+    /// Superseded facts are kept for one full tick so other systems can read prior beliefs.
+    /// </summary>
+    public void PruneExpired(int currentTick, float minimumConfidence = 0.05f)
     {
         foreach (var list in _store.Values)
-            list.RemoveAll(f => f.Confidence < minimumConfidence || f.IsSuperseded);
+            list.RemoveAll(f =>
+                f.Confidence < minimumConfidence ||
+                (f.IsSuperseded && f.SupersededOnTick < currentTick));
     }
 
     /// <summary>
