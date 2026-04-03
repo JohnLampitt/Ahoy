@@ -106,6 +106,15 @@ public record ShipRaided(
 
 // ---- Social events ----
 
+public record BribeAccepted(
+    WorldDate Date, SimulationLod SourceLod,
+    IndividualId GovernorId, PortId PortId,
+    int GoldAmount) : WorldEvent(Date, SourceLod);
+
+public record BribeRejected(
+    WorldDate Date, SimulationLod SourceLod,
+    IndividualId GovernorId, PortId PortId) : WorldEvent(Date, SourceLod);
+
 public record RumourSpread(
     WorldDate Date, SimulationLod SourceLod,
     PortId PortId, string Rumour) : WorldEvent(Date, SourceLod);

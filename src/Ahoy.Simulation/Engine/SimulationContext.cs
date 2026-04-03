@@ -15,11 +15,15 @@ public sealed class SimulationContext
     public RegionId? PlayerRegion { get; }
     public int TickNumber { get; }
 
-    public SimulationContext(WorldState state, int tickNumber)
+    /// <summary>Shared RNG for systems that need randomness during tick processing (e.g. name generation).</summary>
+    public Random Rng { get; }
+
+    public SimulationContext(WorldState state, int tickNumber, Random? rng = null)
     {
         TickNumber = tickNumber;
         PlayerRegion = state.Player.CurrentRegionId;
         _lodMap = ComputeLodMap(state, PlayerRegion);
+        Rng = rng ?? Random.Shared;
     }
 
     /// <summary>Returns the LOD for a given region this tick.</summary>

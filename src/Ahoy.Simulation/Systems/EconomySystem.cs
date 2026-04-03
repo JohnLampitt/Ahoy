@@ -36,6 +36,9 @@ public sealed class EconomySystem : IWorldSystem
             foreach (var m in expired)
                 port.Economy.ActiveModifiers.Remove(m);
 
+            // Reputation decay — extreme reputations require active maintenance
+            port.PersonalReputation *= 0.99f;
+
             // Production and consumption
             ProduceAndConsume(port, lod);
 
@@ -43,6 +46,9 @@ public sealed class EconomySystem : IWorldSystem
             if (lod is SimulationLod.Local or SimulationLod.Regional)
                 EmitPriceShifts(port, portId, state, events, lod);
         }
+
+        // Notoriety decay — fame fades without continued notorious acts
+        state.Player.Notoriety = Math.Clamp(state.Player.Notoriety * 0.999f, 0f, 100f);
 
         // Merchant trade — only ships that are docked
         foreach (var ship in state.Ships.Values.Where(s => !s.IsPlayerShip))

@@ -19,6 +19,7 @@ public sealed class SimulationEngine
     private readonly TickEventEmitter _emitter;
     private readonly IReadOnlyList<IWorldSystem> _systems;
     private readonly DecisionQueue _decisionQueue;
+    private readonly Random _rng;
 
     private int _tickNumber;
 
@@ -35,13 +36,15 @@ public sealed class SimulationEngine
         IPlayerCommandQueue commandQueue,
         TickEventEmitter emitter,
         IReadOnlyList<IWorldSystem> systems,
-        DecisionQueue decisionQueue)
+        DecisionQueue decisionQueue,
+        Random rng)
     {
         _state = state;
         _commandQueue = commandQueue;
         _emitter = emitter;
         _systems = systems;
         _decisionQueue = decisionQueue;
+        _rng = rng;
     }
 
     /// <summary>
@@ -74,7 +77,7 @@ public sealed class SimulationEngine
             new QuestSystem(questTemplates ?? Array.Empty<QuestTemplate>()), // Step 8
         };
 
-        return new SimulationEngine(state, commandQueue, emitter, systems, decisionQueue);
+        return new SimulationEngine(state, commandQueue, emitter, systems, decisionQueue, rng);
     }
 
     /// <summary>
@@ -101,7 +104,7 @@ public sealed class SimulationEngine
         _state.Date = _state.Date.Advance(1);
 
         // 4. Build immutable SimulationContext (LOD map)
-        var context = new SimulationContext(_state, _tickNumber);
+        var context = new SimulationContext(_state, _tickNumber, _rng);
 
         // === SYSTEMS (1–6) ===
         foreach (var system in _systems)
@@ -186,12 +189,42 @@ public sealed class SimulationEngine
                         sellShip.Cargo[sell.Good] -= qty;
                         if (sellShip.Cargo[sell.Good] <= 0) sellShip.Cargo.Remove(sell.Good);
                         sellPort.Economy.Supply[sell.Good] = sellPort.Economy.Supply.GetValueOrDefault(sell.Good) + qty;
+                        sellPort.PersonalReputation += 1f;
                         _emitter.Emit(new TradeCompleted(_state.Date, Core.Enums.SimulationLod.Local,
                             sell.ShipId, sell.PortId, sell.Good, qty, price, false),
                             Core.Enums.SimulationLod.Local);
                     }
                 }
                 break;
+
+            case BribeGovernorCommand bribe:
+            {
+                if (!_state.Individuals.TryGetValue(bribe.GovernorId, out var governor)) break;
+                if (!governor.IsAlive || governor.Role != Core.Enums.IndividualRole.Governor) break;
+                if (!governor.LocationPortId.HasValue) break;
+                if (!_state.Ports.TryGetValue(governor.LocationPortId.Value, out var briberPort)) break;
+
+                // Reject path: too honourable or too hostile
+                if (governor.Authority > 80f || governor.PlayerRelationship < -50f)
+                {
+                    governor.PlayerRelationship = Math.Clamp(governor.PlayerRelationship - 5f, -100f, 100f);
+                    _emitter.Emit(new BribeRejected(_state.Date, Core.Enums.SimulationLod.Local,
+                        bribe.GovernorId, briberPort.Id), Core.Enums.SimulationLod.Local);
+                    break;
+                }
+
+                if (_state.Player.PersonalGold < bribe.GoldAmount) break;
+                _state.Player.PersonalGold -= bribe.GoldAmount;
+
+                // Diminishing returns: each bribe is worth less as relationship rises
+                var gain = (bribe.GoldAmount / 20f) * (1.0f - (Math.Max(0f, governor.PlayerRelationship) / 80f));
+                governor.PlayerRelationship = Math.Clamp(governor.PlayerRelationship + gain, -100f, 80f);
+                briberPort.PersonalReputation += 5f;
+
+                _emitter.Emit(new BribeAccepted(_state.Date, Core.Enums.SimulationLod.Local,
+                    bribe.GovernorId, briberPort.Id, bribe.GoldAmount), Core.Enums.SimulationLod.Local);
+                break;
+            }
 
             case ChooseQuestBranchCommand qb:
                 var quest = _state.Quests.ActiveQuests
@@ -332,6 +365,45 @@ public sealed class SimulationEngine
                 break;
             }
 
+            case BuyKnowledgeCommand buy2:
+            {
+                if (!_state.Individuals.TryGetValue(buy2.BrokerId, out var buyBroker)) break;
+                if (buyBroker.Role != Core.Enums.IndividualRole.KnowledgeBroker) break;
+                if (!buyBroker.IsAlive || buyBroker.IsCompromised) break;
+
+                // Broker must be at the same port as the player
+                var playerShipForBuy = _state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
+                if (playerShipForBuy?.Location is not State.AtPort buyAtPort2) break;
+                if (buyBroker.LocationPortId != buyAtPort2.Port) break;
+
+                // Find the fact in broker's IndividualHolder
+                var buyFact = _state.Knowledge.GetFacts(new State.IndividualHolder(buy2.BrokerId))
+                    .FirstOrDefault(f => f.Id == buy2.FactId && !f.IsSuperseded);
+                if (buyFact is null) break;
+
+                if (_state.Player.PersonalGold < buy2.Price) break;
+                _state.Player.PersonalGold -= buy2.Price;
+
+                // Copy fact to player's knowledge
+                var buyCopy = new State.KnowledgeFact
+                {
+                    Claim = buyFact.Claim,
+                    Sensitivity = buyFact.Sensitivity,
+                    Confidence = buyFact.Confidence,
+                    BaseConfidence = buyFact.Confidence,
+                    ObservedDate = buyFact.ObservedDate,
+                    IsDisinformation = buyFact.IsDisinformation,
+                    HopCount = buyFact.HopCount + 1,
+                    SourceHolder = new State.IndividualHolder(buy2.BrokerId),
+                    OriginatingAgentId = buyFact.OriginatingAgentId,
+                };
+                _state.Knowledge.MarkSuperseded(new State.PlayerHolder(), buyCopy, _tickNumber);
+                _state.Knowledge.AddFact(new State.PlayerHolder(), buyCopy);
+
+                buyBroker.PlayerRelationship = Math.Clamp(buyBroker.PlayerRelationship + 3f, -100f, 100f);
+                break;
+            }
+
             case SellFactCommand sell:
             {
                 // Find broker
@@ -393,6 +465,8 @@ public sealed class SimulationEngine
                 if (brokerExisting != null)
                     _state.Knowledge.MarkSuperseded(brokerHolder, brokerCopy, _tickNumber);
                 _state.Knowledge.AddFact(brokerHolder, brokerCopy);
+
+                broker.PlayerRelationship = Math.Clamp(broker.PlayerRelationship + 5f, -100f, 100f);
                 break;
             }
 
@@ -422,7 +496,7 @@ public sealed class SimulationEngine
                         burn.AgentId, target.FactionId.Value), Core.Enums.SimulationLod.Local);
                 }
 
-                // Seed public rumour in agent's current port
+                // Seed public rumour in agent's current port; penalise port rep
                 if (target.LocationPortId.HasValue)
                 {
                     var assetExposed = new State.KnowledgeFact
@@ -438,7 +512,29 @@ public sealed class SimulationEngine
                     };
                     _state.Knowledge.AddFact(
                         new State.PortHolder(target.LocationPortId.Value), assetExposed);
+
+                    // Port rep hit — dockworkers and merchants saw what happened
+                    if (_state.Ports.TryGetValue(target.LocationPortId.Value, out var burnPort))
+                        burnPort.PersonalReputation -= 20f;
                 }
+
+                // Faction members at the same port resent the player
+                if (target.FactionId.HasValue && target.LocationPortId.HasValue)
+                {
+                    foreach (var ind in _state.Individuals.Values)
+                    {
+                        if (ind.IsAlive
+                            && ind.FactionId == target.FactionId
+                            && ind.LocationPortId == target.LocationPortId
+                            && ind.Id != burn.AgentId)
+                        {
+                            ind.PlayerRelationship = Math.Clamp(ind.PlayerRelationship - 15f, -100f, 100f);
+                        }
+                    }
+                }
+
+                // Player gains notoriety for burning an asset
+                _state.Player.Notoriety = Math.Clamp(_state.Player.Notoriety + 5f, 0f, 100f);
                 break;
             }
         }

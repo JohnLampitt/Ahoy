@@ -20,9 +20,11 @@ namespace Ahoy.Simulation.Systems;
 /// </summary>
 public sealed class IndividualLifecycleSystem : IWorldSystem
 {
-    private const double TourStartChance = 0.02;   // 2% per tick while at home
-    private const int    TourMinTicks    = 3;
-    private const int    TourMaxTicks    = 10;
+    private const double TourStartChance        = 0.02;  // 2% per tick while at home
+    private const int    TourMinTicks           = 3;
+    private const int    TourMaxTicks           = 10;
+    private const double BaseMortality          = 0.002; // ~1% per year (360-tick year)
+    private const double CompromisedMultiplier  = 5.0;   // burned agents: ~5% per year
 
     private readonly Random _rng;
 
@@ -33,6 +35,27 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
 
     public void Tick(WorldState state, SimulationContext context, IEventEmitter events)
     {
+        // --- Mortality pass ---
+        foreach (var individual in state.Individuals.Values)
+        {
+            if (!individual.IsAlive) continue;
+            var chance = individual.IsCompromised
+                ? BaseMortality * CompromisedMultiplier
+                : BaseMortality;
+            if (_rng.NextDouble() < chance)
+            {
+                individual.IsAlive = false;
+                var lod = individual.LocationPortId.HasValue
+                    && state.Ports.TryGetValue(individual.LocationPortId.Value, out var p)
+                    && state.Regions.TryGetValue(p.RegionId, out _)
+                        ? context.GetLod(p.RegionId)
+                        : SimulationLod.Distant;
+                var cause = individual.IsCompromised ? "Burned agent — accident" : "Natural causes";
+                events.Emit(new IndividualDied(state.Date, lod, individual.Id, cause), lod);
+            }
+        }
+
+        // --- Tour movement pass ---
         foreach (var individual in state.Individuals.Values)
         {
             if (!individual.IsAlive) continue;

@@ -9,6 +9,16 @@ namespace Ahoy.Simulation.Decisions;
 /// </summary>
 public sealed class RuleBasedDecisionProvider : ISyncActorDecisionProvider
 {
+    /// <summary>
+    /// Effective affinity blends the actor's personal relationship with the port's
+    /// structural reputation. Port rep (populace view) has 60% weight; personal
+    /// relationship has 40% weight. This creates emergent tension — a new hostile
+    /// governor assigned to a port that loves the player will still be somewhat
+    /// constrained by the port's positive culture.
+    /// </summary>
+    private static float EffectiveAffinity(ActorDecisionContext ctx)
+        => (ctx.PortPersonalReputation * 0.6f) + (ctx.PlayerRelationship * 0.4f);
+
     public ActorDecisionMatrix ResolveMatrix(ActorDecisionContext context)
     {
         var traits = context.PersonalityTraits;
@@ -109,7 +119,7 @@ public sealed class RuleBasedDecisionProvider : ISyncActorDecisionProvider
     {
         var loyalty = ctx.PersonalityTraits?.Loyalty ?? 0f;
 
-        if (loyalty > 0f && ctx.PlayerRelationship > 10f)
+        if (loyalty > 0f && EffectiveAffinity(ctx) > 10f)
         {
             return new ActorDecision
             {
