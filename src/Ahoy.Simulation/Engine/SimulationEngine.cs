@@ -223,7 +223,9 @@ public sealed class SimulationEngine
                 // they do NOT get magic direct notification.
                 var playerPortForAction = (_state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip)?.Location
                     as State.AtPort)?.Port;
-                var actionFact = new State.KnowledgeFact
+                // PlayerHolder copy is decay-exempt: the player's own ledger of their actions
+                // is a record of agency, not an epistemic guess that should fade.
+                var playerCopyFact = new State.KnowledgeFact
                 {
                     Claim          = new State.PlayerActionClaim(quest.Template.Id.Value, branch.BranchId, playerPortForAction),
                     Sensitivity    = Core.Enums.KnowledgeSensitivity.Restricted,
@@ -232,10 +234,24 @@ public sealed class SimulationEngine
                     ObservedDate   = _state.Date,
                     HopCount       = 0,
                     SourceHolder   = null,
+                    IsDecayExempt  = true,
                 };
-                _state.Knowledge.AddFact(new State.PlayerHolder(), actionFact);
+                _state.Knowledge.AddFact(new State.PlayerHolder(), playerCopyFact);
+                // Port copy decays normally — witnesses forget, but the player never does.
                 if (playerPortForAction.HasValue)
-                    _state.Knowledge.AddFact(new State.PortHolder(playerPortForAction.Value), actionFact);
+                {
+                    var portCopyFact = new State.KnowledgeFact
+                    {
+                        Claim          = new State.PlayerActionClaim(quest.Template.Id.Value, branch.BranchId, playerPortForAction),
+                        Sensitivity    = Core.Enums.KnowledgeSensitivity.Restricted,
+                        Confidence     = 1.0f,
+                        BaseConfidence = 1.0f,
+                        ObservedDate   = _state.Date,
+                        HopCount       = 0,
+                        SourceHolder   = null,
+                    };
+                    _state.Knowledge.AddFact(new State.PortHolder(playerPortForAction.Value), portCopyFact);
+                }
 
                 // Cooldown: suppress re-triggering this quest/subject for 20 ticks
                 var actionSubjectKey = quest.TriggerFacts.Count > 0
@@ -345,6 +361,43 @@ public sealed class SimulationEngine
         // Degrade the reliability of whatever source passed this to the player.
         if (lie.SourceHolder is not null)
             state.Knowledge.RecordSourceOutcome(lie.SourceHolder, wasAccurate: false);
+
+        // Resolve the deceiving faction from the lie's source holder.
+        // The faction whose controlled port seeded the lie is the deceiver.
+        var deceivingFaction = lie.SourceHolder switch
+        {
+            State.FactionHolder fh => (Core.Ids.FactionId?)fh.Faction,
+            State.PortHolder ph when state.Ports.TryGetValue(ph.Port, out var p) => p.ControllingFactionId,
+            _ => null,
+        };
+
+        if (deceivingFaction.HasValue)
+        {
+            // Emit the event so other systems (and eventually FactionSystem goal-scoring) can react.
+            var exposedAtPort = (correction.Claim is State.ShipLocationClaim slc2)
+                ? (state.Ships.TryGetValue(slc2.Ship, out var s2) && s2.Location is State.AtPort ap2 ? (Core.Ids.PortId?)ap2.Port : null)
+                : null;
+            _emitter.Emit(
+                new Events.DeceptionExposed(state.Date, Core.Enums.SimulationLod.Local,
+                    deceivingFaction.Value, exposedAtPort),
+                Core.Enums.SimulationLod.Local);
+
+            // Seed a fact to the deceiving faction's FactionHolder so their
+            // future decision-making can know the player detected their plant.
+            state.Knowledge.AddFact(
+                new State.FactionHolder(deceivingFaction.Value),
+                new State.KnowledgeFact
+                {
+                    Claim          = new State.CustomClaim("DeceptionExposed",
+                                         $"Deception against player detected and corrected."),
+                    Sensitivity    = Core.Enums.KnowledgeSensitivity.Secret,
+                    Confidence     = 0.90f,
+                    BaseConfidence = 0.90f,
+                    ObservedDate   = state.Date,
+                    HopCount       = 0,
+                    SourceHolder   = null,
+                });
+        }
     }
 
     private static void ApplyCompletedDecision(ActorDecisionRequest request)

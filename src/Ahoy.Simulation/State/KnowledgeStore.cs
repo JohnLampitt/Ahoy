@@ -84,6 +84,22 @@ public sealed class KnowledgeFact
     public int CorroborationCount { get; set; }
 
     /// <summary>
+    /// FactionIds that have already contributed a corroboration boost for this fact.
+    /// A faction's echo chamber (multiple ports controlled by the same faction all
+    /// repeating the same claim) can only boost confidence once per faction, not once
+    /// per port. Null origin (player / direct witness) bypasses this guard.
+    /// </summary>
+    public HashSet<FactionId> CorroboratingFactionIds { get; } = new();
+
+    /// <summary>
+    /// When true, the per-tick decay pass skips this fact.
+    /// Used for the PlayerHolder copy of PlayerActionClaim: the player's own record
+    /// of their actions is a ledger of agency, not an epistemic guess that should fade.
+    /// Third-party copies (PortHolder, FactionHolder) are NOT exempt — factions do forget.
+    /// </summary>
+    public bool IsDecayExempt { get; init; }
+
+    /// <summary>
     /// Returns a canonical key identifying what this fact is about.
     /// Two facts with the same subject key held by the same holder supersede each other.
     /// </summary>
@@ -148,7 +164,8 @@ public sealed class KnowledgeStore
     // Applied as a multiplier to incoming confidence during propagation.
     private readonly Dictionary<KnowledgeHolderId, float> _sourceReliability = new();
 
-    public void AddFact(KnowledgeHolderId holder, KnowledgeFact fact)
+    /// <returns>True if this addition created a brand-new conflict for this (holder, subjectKey) pair.</returns>
+    public bool AddFact(KnowledgeHolderId holder, KnowledgeFact fact)
     {
         if (!_store.TryGetValue(holder, out var list))
         {
@@ -159,7 +176,7 @@ public sealed class KnowledgeStore
 
         // Update conflict index for this (holder, subject)
         var subjectKey = KnowledgeFact.GetSubjectKey(fact.Claim);
-        UpdateConflicts(holder, subjectKey);
+        return UpdateConflicts(holder, subjectKey);
     }
 
     public IReadOnlyList<KnowledgeFact> GetFacts(KnowledgeHolderId holder)
@@ -246,9 +263,10 @@ public sealed class KnowledgeStore
 
     // ---- Conflict maintenance ----
 
-    private void UpdateConflicts(KnowledgeHolderId holder, string subjectKey)
+    /// <returns>True if this call created a brand-new conflict (was not already tracked).</returns>
+    private bool UpdateConflicts(KnowledgeHolderId holder, string subjectKey)
     {
-        if (!_store.TryGetValue(holder, out var list)) return;
+        if (!_store.TryGetValue(holder, out var list)) return false;
 
         var active = list
             .Where(f => !f.IsSuperseded && KnowledgeFact.GetSubjectKey(f.Claim) == subjectKey)
@@ -259,8 +277,15 @@ public sealed class KnowledgeStore
 
         var key = (holder, subjectKey);
         if (hasContradiction)
+        {
+            var isNew = !_conflicts.ContainsKey(key);
             _conflicts[key] = new KnowledgeConflict { SubjectKey = subjectKey, CompetingFacts = active };
+            return isNew;
+        }
         else
+        {
             _conflicts.Remove(key);
+            return false;
+        }
     }
 }
