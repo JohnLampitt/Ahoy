@@ -20,6 +20,9 @@ public sealed class FactionSystem : IWorldSystem
     // We re-emit whenever strength changes by ≥ 10% (or drops to 0 for the first time).
     private readonly Dictionary<FactionId, int> _lastEmittedNavalStrength = new();
 
+    // Key: burned IndividualId. Value: tick on which replacement should be spawned.
+    private readonly Dictionary<IndividualId, int> _burnReplacementTimers = new();
+
     // Utility scoring thresholds
     private const float GoalAdoptThreshold  = 0.65f;
     private const float GoalAbandonThreshold = 0.25f;
@@ -53,8 +56,11 @@ public sealed class FactionSystem : IWorldSystem
 
             UpdateGoals(faction, factionId, state, context);
             TickRelationshipDecay(faction);
+            TickIntelligence(faction);
             EmitStrengthFactIfChanged(faction, factionId, state, context);
         }
+
+        TickBurnReplacements(state, context, events);
     }
 
     // ---- Colonial ----
@@ -174,6 +180,7 @@ public sealed class FactionSystem : IWorldSystem
             AccumulateTreasury => faction.TreasuryGold < 2000 ? 0.80f : 0.20f,
             RaidShippingLane r => faction.Type == FactionType.PirateBrotherhood ? 0.75f : 0.05f,
             EstablishHaven eh  => faction.Type == FactionType.PirateBrotherhood ? 0.65f : 0.00f,
+            EspionageGoal      => faction.IntelligenceCapability < 0.80f ? 0.70f : 0.20f,
             _                  => 0.50f,
         };
 
@@ -191,6 +198,7 @@ public sealed class FactionSystem : IWorldSystem
 
             goals.Add(new BuildNavy());
             goals.Add(new AccumulateTreasury());
+            goals.Add(new EspionageGoal());
 
             foreach (var (regionId, _) in state.Regions)
                 goals.Add(new SuppressPiracy(regionId));
@@ -280,6 +288,7 @@ public sealed class FactionSystem : IWorldSystem
             "AccumulateTreasury" => "Consolidating treasury reserves",
             "RaidShippingLane"   => "Raiding merchant shipping lanes",
             "EstablishHaven"     => "Establishing a pirate haven",
+            "EspionageGoal"      => "Expanding intelligence and counter-intelligence operations",
             _                    => "Pursuing undisclosed strategic objectives",
         };
 
@@ -325,8 +334,8 @@ public sealed class FactionSystem : IWorldSystem
             ? adjacentRegions[_rng.Next(adjacentRegions.Count)]
             : targetRegion;
 
-        // High confidence (0.75–0.90) makes it credible enough to trigger Quest A1
-        var confidence = 0.75f + (float)_rng.NextDouble() * 0.15f;
+        // Confidence scales with faction's intelligence capability (0.70–0.95)
+        var confidence = Math.Clamp(0.70f + faction.IntelligenceCapability * 0.25f, 0.70f, 0.95f);
 
         var falseFact = new KnowledgeFact
         {
@@ -338,11 +347,65 @@ public sealed class FactionSystem : IWorldSystem
             IsDisinformation = true,
             HopCount = 1,  // appears to have already spread once — more believable
             SourceHolder = new FactionHolder(factionId),
+            OriginatingAgentId = baitShip.CaptainId,
         };
 
         // Seed into the haven's knowledge pool; it will propagate naturally from there
         state.Knowledge.MarkSuperseded(new PortHolder(targetPort.Id), falseFact, context.TickNumber);
         state.Knowledge.AddFact(new PortHolder(targetPort.Id), falseFact);
+    }
+
+    private static void TickIntelligence(Faction faction)
+    {
+        if (faction.ActiveGoals.Any(g => g is EspionageGoal))
+            faction.IntelligenceCapability = Math.Clamp(faction.IntelligenceCapability + 0.005f, 0.10f, 0.95f);
+    }
+
+    private void TickBurnReplacements(WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        // Start timers for any newly-compromised individuals not yet tracked
+        foreach (var (id, individual) in state.Individuals)
+        {
+            if (individual.IsAlive && individual.IsCompromised && individual.FactionId.HasValue
+                && !_burnReplacementTimers.ContainsKey(id))
+            {
+                _burnReplacementTimers[id] = context.TickNumber + 30;
+            }
+        }
+
+        // Fire replacements when timer elapses
+        foreach (var (agentId, replaceTick) in _burnReplacementTimers.ToList())
+        {
+            if (context.TickNumber < replaceTick) continue;
+
+            _burnReplacementTimers.Remove(agentId);
+
+            if (!state.Individuals.TryGetValue(agentId, out var burned)) continue;
+            if (!burned.IsAlive || !burned.IsCompromised || !burned.FactionId.HasValue) continue;
+            if (!state.Factions.TryGetValue(burned.FactionId.Value, out var faction)) continue;
+
+            // Check treasury can support a new agent
+            if (faction.TreasuryGold < 500) continue;
+            faction.TreasuryGold -= 500;
+
+            var replacement = new Individual
+            {
+                Id = IndividualId.New(),
+                FirstName = "New",
+                LastName = burned.LastName,
+                Role = burned.Role,
+                FactionId = burned.FactionId,
+                LocationPortId = burned.LocationPortId ?? burned.HomePortId,
+                HomePortId = burned.HomePortId,
+            };
+            replacement.IsAlive = true;
+            state.Individuals[replacement.Id] = replacement;
+
+            burned.IsAlive = false;
+
+            events.Emit(new AgentReplaced(state.Date, SimulationLod.Local,
+                agentId, replacement.Id, burned.FactionId.Value), SimulationLod.Local);
+        }
     }
 
     private static void TickRelationshipDecay(Faction faction)
@@ -375,6 +438,10 @@ public sealed class FactionSystem : IWorldSystem
                     break;
                 case "NavalLoss":
                     faction.NavalStrength = Math.Max(0, faction.NavalStrength - (int)s.Magnitude);
+                    break;
+                case "DeceptionExposed":
+                    faction.IntelligenceCapability = Math.Clamp(
+                        faction.IntelligenceCapability - 0.05f, 0.10f, 0.95f);
                     break;
             }
         }

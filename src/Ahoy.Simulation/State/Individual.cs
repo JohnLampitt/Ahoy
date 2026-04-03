@@ -38,4 +38,8 @@ public sealed class Individual
     // --- Flags ---
     public bool IsAlive { get; set; } = true;
     public bool IsPlayerKnown { get; set; }
+    public bool IsCompromised { get; set; }
+
+    // --- Wealth ---
+    public int CurrentGold { get; set; }
 }

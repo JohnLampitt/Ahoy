@@ -39,6 +39,13 @@ public sealed class Ship
     /// <summary>If set, the ship has a destination it is routing toward.</summary>
     public PortId? RoutingDestination { get; set; }
 
+    /// <summary>
+    /// Number of consecutive ticks this ship has been docked at its current port.
+    /// Reset to 0 by ShipMovementSystem on arrival. Incremented each tick while docked.
+    /// Used to compute idle crew expenditure and knowledge-gated departure.
+    /// </summary>
+    public int TicksDockedAtCurrentPort { get; set; }
+
     // --- Flags ---
     public bool IsPlayerShip { get; init; }
     public bool IsPirate { get; set; }

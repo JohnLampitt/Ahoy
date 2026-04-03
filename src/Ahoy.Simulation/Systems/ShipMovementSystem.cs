@@ -45,6 +45,10 @@ public sealed class ShipMovementSystem : IWorldSystem
         {
             var lod = GetShipLod(ship, state, context);
 
+            // Crew upkeep applies every tick regardless of movement state
+            if (!ship.IsPlayerShip)
+                DeductCrewUpkeep(ship, state);
+
             switch (ship.Location)
             {
                 case AtPort atPort:
@@ -70,11 +74,17 @@ public sealed class ShipMovementSystem : IWorldSystem
         // Player ship — only departs via PlayerCommand
         if (ship.IsPlayerShip) return;
 
-        // NPC ship at port with no destination — pick one
+        // Track how long this ship has been docked
+        if (!ship.IsPlayerShip)
+            ship.TicksDockedAtCurrentPort++;
+
+        // NPC ship at port with no destination — pick one if agent has knowledge or has waited long enough
         if (!ship.RoutingDestination.HasValue &&
             state.Ports.TryGetValue(atPort.Port, out var currentPort2))
         {
-            AssignNpcRoute(ship, currentPort2.RegionId, state);
+            var shouldDepart = ShouldDepartPort(ship, state);
+            if (shouldDepart)
+                AssignNpcRoute(ship, currentPort2.RegionId, state);
         }
 
         // NPC with a routing destination set — depart
@@ -143,6 +153,7 @@ public sealed class ShipMovementSystem : IWorldSystem
             ship.ArrivedThisTick = true;
             ship.RouteProgressAccumulator = 0;
             ship.RoutingDestination = null;
+            ship.TicksDockedAtCurrentPort = 0;
 
             // Update port's docked list
             if (state.Ports.TryGetValue(portId, out var port))
@@ -157,6 +168,46 @@ public sealed class ShipMovementSystem : IWorldSystem
             ship.RouteProgressAccumulator = 0;
             events.Emit(new ShipEnteredRegion(state.Date, lod, ship.Id, regionId), lod);
         }
+    }
+
+    private static void DeductCrewUpkeep(Ship ship, WorldState state)
+    {
+        const int UpkeepPerCrewPerTick = 1;
+        var totalCost = ship.CurrentCrew * UpkeepPerCrewPerTick;
+        if (totalCost <= 0) return;
+
+        if (ship.CaptainId.HasValue
+            && state.Individuals.TryGetValue(ship.CaptainId.Value, out var captain))
+        {
+            var deduct = Math.Min(captain.CurrentGold, totalCost);
+            captain.CurrentGold -= deduct;
+            var remainder = totalCost - deduct;
+            if (remainder > 0)
+                ship.GoldOnBoard = Math.Max(0, ship.GoldOnBoard - remainder);
+        }
+        else
+        {
+            ship.GoldOnBoard = Math.Max(0, ship.GoldOnBoard - totalCost);
+        }
+    }
+
+    private static bool ShouldDepartPort(Ship ship, WorldState state)
+    {
+        // Always depart if docked too long (prevents permanent stranding)
+        if (ship.TicksDockedAtCurrentPort >= 5) return true;
+
+        // Depart if captain has market intelligence for accessible ports
+        if (ship.CaptainId.HasValue)
+        {
+            var captainHolder = new IndividualHolder(ship.CaptainId.Value);
+            var hasActionableKnowledge = state.Knowledge.GetFacts(captainHolder)
+                .Any(f => !f.IsSuperseded
+                    && f.Claim is PortPriceClaim
+                    && f.Confidence > 0.40f);
+            if (hasActionableKnowledge) return true;
+        }
+
+        return false;
     }
 
     private void AssignNpcRoute(Ship ship, RegionId currentRegion, WorldState state)
@@ -178,9 +229,16 @@ public sealed class ShipMovementSystem : IWorldSystem
             .Select(f => (PortId?)((PortPriceClaim)f.Claim).Port)
             .FirstOrDefault();
 
-        // Fallback: random accessible port when agent holds no price knowledge.
-        // Random is correct for zero-knowledge agents — not arbitrary but honest.
-        var candidate = best ?? GetRandomAccessiblePort(currentRegion, state);
+        // Fallback chain: HomePort (if stranded) → random accessible port
+        PortId? homePort = null;
+        if (ship.CaptainId.HasValue
+            && state.Individuals.TryGetValue(ship.CaptainId.Value, out var captain)
+            && captain.HomePortId.HasValue)
+        {
+            homePort = captain.HomePortId;
+        }
+
+        var candidate = best ?? homePort ?? GetRandomAccessiblePort(currentRegion, state);
         if (!candidate.HasValue) return;
 
         ship.RoutingDestination = candidate;

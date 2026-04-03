@@ -138,6 +138,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             TreasuryGold = 12000, NavalStrength = 18,
             DesiredNavalAllocationFraction = 0.30f,
             CurrentNavalAllocationFraction = 0.30f,
+            IntelligenceCapability = 0.55f,
         };
         state.Factions[spain].ClaimedRegions.AddRange([r.Gulf, r.Western, r.SpanishMain]);
         state.Factions[spain].PatrolAllocations[r.Gulf] = 6;
@@ -151,6 +152,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             TreasuryGold = 8000, NavalStrength = 12,
             DesiredNavalAllocationFraction = 0.25f,
             CurrentNavalAllocationFraction = 0.25f,
+            IntelligenceCapability = 0.45f,
         };
         state.Factions[england].ClaimedRegions.AddRange([r.Eastern, r.Central]);
         state.Factions[england].PatrolAllocations[r.Eastern] = 5;
@@ -163,6 +165,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             TreasuryGold = 7000, NavalStrength = 10,
             DesiredNavalAllocationFraction = 0.25f,
             CurrentNavalAllocationFraction = 0.25f,
+            IntelligenceCapability = 0.40f,
         };
         state.Factions[france].ClaimedRegions.AddRange([r.Eastern, r.Western]);
         state.Factions[france].PatrolAllocations[r.Eastern] = 4;
@@ -175,6 +178,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             TreasuryGold = 9000, NavalStrength = 9,
             DesiredNavalAllocationFraction = 0.20f,
             CurrentNavalAllocationFraction = 0.20f,
+            IntelligenceCapability = 0.50f,
         };
         state.Factions[netherlands].ClaimedRegions.AddRange([r.Western, r.Central]);
         state.Factions[netherlands].PatrolAllocations[r.Western] = 3;
@@ -186,6 +190,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             Id = brethren, Name = "Brethren of the Blood", Type = FactionType.PirateBrotherhood,
             TreasuryGold = 3000, NavalStrength = 6,
             Cohesion = 72f, RaidingMomentum = 55f,
+            IntelligenceCapability = 0.30f,
         };
         state.Factions[brethren].HavenPresence[r.Western] = 65f;
         state.Factions[brethren].HavenPresence[r.Central] = 30f;
@@ -195,6 +200,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             Id = silverCoast, Name = "Silver Coast Rovers", Type = FactionType.PirateBrotherhood,
             TreasuryGold = 2000, NavalStrength = 5,
             Cohesion = 58f, RaidingMomentum = 62f,
+            IntelligenceCapability = 0.25f,
         };
         state.Factions[silverCoast].HavenPresence[r.SpanishMain] = 70f;
         state.Factions[silverCoast].HavenPresence[r.Eastern] = 20f;
@@ -530,10 +536,10 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         AddPirate(state, rng, "Anne",        "Bonny",   p.Cayos,      f.BrethrensOfBlood);
         AddPirate(state, rng, "Bartholomew", "Roberts", p.Cartagena,  f.SilverCoast);
 
-        // Knowledge brokers
-        AddBroker(state, rng, "Pedro",   "Ruiz",    p.Nassau);
-        AddBroker(state, rng, "Hannah",  "Clarke",  p.PortRoyal);
-        AddBroker(state, rng, "Ibrahim", "al-Kazi", p.Willemstad);
+        // Knowledge brokers (factionId = sponsoring faction for gold pool; null = independent)
+        AddBroker(state, rng, "Pedro",   "Ruiz",    p.Nassau,     null);
+        AddBroker(state, rng, "Hannah",  "Clarke",  p.PortRoyal,  f.England);
+        AddBroker(state, rng, "Ibrahim", "al-Kazi", p.Willemstad, f.Netherlands);
     }
 
     private static void AddGovernor(WorldState state, Random rng,
@@ -586,17 +592,41 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
     }
 
     private static void AddBroker(WorldState state, Random rng,
-        string first, string last, PortId portId)
+        string first, string last, PortId portId, FactionId? factionId = null)
     {
         var id = IndividualId.New();
-        state.Individuals[id] = new Individual
+        var broker = new Individual
         {
             Id = id, FirstName = first, LastName = last,
             Role = IndividualRole.KnowledgeBroker,
+            FactionId = factionId,
             LocationPortId = portId,
+            HomePortId = portId,
             Authority = 30f,
             Personality = PersonalityTraits.Random(rng),
         };
+        broker.CurrentGold = 200;
+        state.Individuals[id] = broker;
+
+        // Bootstrap broker's knowledge with FactionStrengthClaims for all factions
+        // Simulates them having spent time listening to gossip before play begins
+        var brokerHolder = new Ahoy.Simulation.State.IndividualHolder(id);
+        foreach (var (factFactionId, faction) in state.Factions)
+        {
+            var seedConfidence = 0.55f + (float)rng.NextDouble() * 0.15f;
+            var fact = new Ahoy.Simulation.State.KnowledgeFact
+            {
+                Claim = new Ahoy.Simulation.State.FactionStrengthClaim(
+                    factFactionId, faction.NavalStrength, faction.TreasuryGold),
+                Sensitivity = Ahoy.Core.Enums.KnowledgeSensitivity.Restricted,
+                Confidence = seedConfidence,
+                BaseConfidence = seedConfidence,
+                ObservedDate = state.Date,
+                HopCount = 1,
+                SourceHolder = new Ahoy.Simulation.State.FactionHolder(factFactionId),
+            };
+            state.Knowledge.AddFact(brokerHolder, fact);
+        }
     }
 
     // ================================================================
@@ -668,16 +698,19 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         if (captainFirst is not null && captainLast is not null)
         {
             var captainId = IndividualId.New();
-            state.Individuals[captainId] = new Individual
+            var captain = new Individual
             {
-                Id           = captainId,
-                FirstName    = captainFirst,
-                LastName     = captainLast,
-                Role         = IndividualRole.PortMerchant,
-                FactionId    = faction,
+                Id             = captainId,
+                FirstName      = captainFirst,
+                LastName       = captainLast,
+                Role           = IndividualRole.PortMerchant,
+                FactionId      = faction,
                 LocationPortId = portId,
-                Personality  = PersonalityTraits.Random(rng),
+                HomePortId     = portId,
+                Personality    = PersonalityTraits.Random(rng),
             };
+            captain.CurrentGold = 150 + rng.Next(0, 100);
+            state.Individuals[captainId] = captain;
             ship.CaptainId = captainId;
         }
     }

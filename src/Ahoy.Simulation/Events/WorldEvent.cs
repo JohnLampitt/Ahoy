@@ -144,6 +144,28 @@ public record KnowledgeConflictDetected(
     KnowledgeFactId FactBId,
     KnowledgeHolderId HolderId) : WorldEvent(Date, SourceLod);
 
+// ---- Investigation & intelligence events ----
+
+/// <summary>Emitted when an investigation resolves (local or remote).</summary>
+public record InvestigationResolved(
+    WorldDate Date, SimulationLod SourceLod,
+    string SubjectKey,
+    KnowledgeFactId? ResultFactId,
+    bool WasSuccessful) : WorldEvent(Date, SourceLod);
+
+/// <summary>Emitted when an individual is burned (IsCompromised set to true).</summary>
+public record AgentBurned(
+    WorldDate Date, SimulationLod SourceLod,
+    IndividualId AgentId,
+    FactionId OwningFactionId) : WorldEvent(Date, SourceLod);
+
+/// <summary>Emitted when a faction replaces a burned agent after the 30-tick timer.</summary>
+public record AgentReplaced(
+    WorldDate Date, SimulationLod SourceLod,
+    IndividualId OldAgentId,
+    IndividualId NewAgentId,
+    FactionId OwningFactionId) : WorldEvent(Date, SourceLod);
+
 // ---- Quest events ----
 
 public record QuestActivated(
