@@ -29,20 +29,32 @@ public sealed class QuestSystem : IWorldSystem
             .Where(f => !f.IsSuperseded)
             .ToList();
 
-        // 1. Expire active quests whose predicate is now true
+        // 1. Expire active quests
         foreach (var instance in state.Quests.ActiveQuests.ToList())
         {
-            if (instance.Template.ExpiryPredicate(instance, state))
-            {
-                instance.Status = QuestStatus.Expired;
-                instance.ResolvedDate = state.Date;
-                state.Quests.Resolve(instance);
-                events.Emit(new QuestResolved(
-                    state.Date, SimulationLod.Local,
-                    instance.Template.Id.Value, instance.Id.ToString(),
-                    instance.Title, QuestStatus.Expired, null),
-                    SimulationLod.Local);
-            }
+            // Primary: natural decay — the trigger condition no longer holds in the player's knowledge.
+            // This honours the design goal: "knowledge-gated, not timer-gated."
+            var naturallyExpired = !EvaluateCondition(instance.Template.TriggerCondition, playerFacts);
+            // Backstop: each template's own hard timer. Keeps per-template calibration;
+            // prevents phantom quests if a false fact gets stuck in an echo chamber.
+            var timedOut = instance.Template.ExpiryPredicate(instance, state);
+
+            if (!naturallyExpired && !timedOut) continue;
+
+            // Record a 20-tick cooldown so the same rumour doesn't immediately re-trigger.
+            var subjectKey = instance.TriggerFacts.Count > 0
+                ? KnowledgeFact.GetSubjectKey(instance.TriggerFacts[0].Claim)
+                : instance.Template.Id.Value;
+            state.Quests.RecordCooldown(instance.Template.Id, subjectKey, state.Date.Advance(20));
+
+            instance.Status       = QuestStatus.Expired;
+            instance.ResolvedDate = state.Date;
+            state.Quests.Resolve(instance);
+            events.Emit(new QuestResolved(
+                state.Date, SimulationLod.Local,
+                instance.Template.Id.Value, instance.Id.ToString(),
+                instance.Title, QuestStatus.Expired, null),
+                SimulationLod.Local);
         }
 
         // 2. Check all templates for new triggers
@@ -55,6 +67,14 @@ public sealed class QuestSystem : IWorldSystem
                 continue;
 
             var triggerFacts = template.TriggerFactSelector(playerFacts);
+
+            // Cooldown guard: don't re-trigger the same quest on the same subject too soon.
+            var subjectKey = triggerFacts.Count > 0
+                ? KnowledgeFact.GetSubjectKey(triggerFacts[0].Claim)
+                : template.Id.Value;
+            if (state.Quests.IsOnCooldown(template.Id, subjectKey, state.Date))
+                continue;
+
             var title = template.TitleFactory?.Invoke(triggerFacts) ?? template.Title;
             var instance = new QuestInstance
             {
@@ -64,6 +84,10 @@ public sealed class QuestSystem : IWorldSystem
                 Title         = title,
             };
             state.Quests.AddActive(instance);
+            // Prevent the same fact from triggering another instance for 20 ticks,
+            // even when AllowDuplicateInstances = true. Without this, every tick while
+            // the fact exists creates a new instance before the first one can expire.
+            state.Quests.RecordCooldown(template.Id, subjectKey, state.Date.Advance(20));
             events.Emit(new QuestActivated(
                 state.Date, SimulationLod.Local,
                 template.Id.Value, instance.Id.ToString(),

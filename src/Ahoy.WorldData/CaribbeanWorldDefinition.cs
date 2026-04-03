@@ -546,6 +546,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             Role = IndividualRole.Governor,
             FactionId = factionId,
             LocationPortId = portId,
+            HomePortId = portId,   // governors return home after inspection tours
             Authority = authority,
             Personality = PersonalityTraits.Random(rng),
         };
