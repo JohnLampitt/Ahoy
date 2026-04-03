@@ -16,6 +16,9 @@ namespace Ahoy.Simulation.Systems;
 public sealed class FactionSystem : IWorldSystem
 {
     private readonly Random _rng;
+    // Tracks the last NavalStrength value for which we emitted a FactionStrengthClaim per faction.
+    // We re-emit whenever strength changes by ≥ 10% (or drops to 0 for the first time).
+    private readonly Dictionary<FactionId, int> _lastEmittedNavalStrength = new();
 
     // Utility scoring thresholds
     private const float GoalAdoptThreshold  = 0.65f;
@@ -50,6 +53,7 @@ public sealed class FactionSystem : IWorldSystem
 
             UpdateGoals(faction, factionId, state, context);
             TickRelationshipDecay(faction);
+            EmitStrengthFactIfChanged(faction, factionId, state, context);
         }
     }
 
@@ -198,6 +202,62 @@ public sealed class FactionSystem : IWorldSystem
         }
 
         return goals;
+    }
+
+    /// <summary>
+    /// Emits a FactionStrengthClaim into the faction's own holder and all ports it controls
+    /// whenever naval strength has changed by ≥ 10% since the last emission.
+    /// This is the knowledge-layer signal that quests A4 and B3 listen for.
+    /// </summary>
+    private void EmitStrengthFactIfChanged(Faction faction, FactionId factionId,
+        WorldState state, SimulationContext context)
+    {
+        var current = faction.NavalStrength;
+        if (!_lastEmittedNavalStrength.TryGetValue(factionId, out var last))
+        {
+            // First tick for this faction — always emit
+            _lastEmittedNavalStrength[factionId] = current;
+            EmitStrengthFact(faction, factionId, state, context, current, 0.80f);
+            return;
+        }
+
+        // Threshold: 10% relative change, or absolute drop of 1 when last was ≤ 5
+        var changed = last == 0
+            ? current != 0
+            : Math.Abs(current - last) / (float)last >= 0.10f || (last <= 5 && current != last);
+
+        if (!changed) return;
+        _lastEmittedNavalStrength[factionId] = current;
+
+        // Confidence reflects how "newsworthy" the change is — big drops are more noticed
+        var delta = last - current;
+        var confidence = delta > 0 ? Math.Clamp(0.50f + delta * 0.03f, 0.50f, 0.90f) : 0.55f;
+        EmitStrengthFact(faction, factionId, state, context, current, confidence);
+    }
+
+    private void EmitStrengthFact(Faction faction, FactionId factionId,
+        WorldState state, SimulationContext context, int strength, float confidence)
+    {
+        var fact = new KnowledgeFact
+        {
+            Claim = new FactionStrengthClaim(factionId, strength, faction.TreasuryGold),
+            Sensitivity = KnowledgeSensitivity.Restricted,
+            Confidence = confidence,
+            BaseConfidence = confidence,
+            ObservedDate = state.Date,
+            SourceHolder = new FactionHolder(factionId),
+        };
+
+        // Seed into faction holder
+        state.Knowledge.MarkSuperseded(new FactionHolder(factionId), fact, context.TickNumber);
+        state.Knowledge.AddFact(new FactionHolder(factionId), fact);
+
+        // Seed into ports this faction controls — word spreads from there
+        foreach (var port in state.Ports.Values.Where(p => p.ControllingFactionId == factionId))
+        {
+            state.Knowledge.MarkSuperseded(new PortHolder(port.Id), fact, context.TickNumber);
+            state.Knowledge.AddFact(new PortHolder(port.Id), fact);
+        }
     }
 
     /// <summary>
