@@ -605,6 +605,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
 
     private static void DefineShips(WorldState state, PortIds p, FactionIds f)
     {
+        var rng = new Random(43); // deterministic seed — different from DefineIndividuals (42)
         // Player's starting sloop — docked at Nassau
         var playerShipId = ShipId.New();
         var playerShip = new Ship
@@ -627,19 +628,22 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         state.Player.FlagshipId = playerShipId;
         state.Player.FleetIds.Add(playerShipId);
 
-        // A handful of NPC merchant brigs
-        AddMerchant(state, "San Cristóbal",  ShipClass.Brig,    p.Veracruz,    f.Spain,       TradeGood.Silver, 30);
-        AddMerchant(state, "Prosperity",      ShipClass.Brig,    p.Bridgetown,  f.England,     TradeGood.Sugar,  50);
-        AddMerchant(state, "Volendammer",     ShipClass.Brig,    p.Willemstad,  f.Netherlands, TradeGood.Cloth,  40);
-        AddMerchant(state, "Belle Étoile",    ShipClass.Brigantine, p.Martinique, f.France,    TradeGood.Indigo, 25);
+        // A handful of NPC merchant brigs — each with a named captain (Individual-first model).
+        // Captains accumulate knowledge via IndividualHolder as they sail between ports,
+        // and drive knowledge-gated routing decisions via ShipMovementSystem.AssignNpcRoute().
+        AddMerchant(state, rng, "San Cristóbal",  ShipClass.Brig,       p.Veracruz,   f.Spain,       TradeGood.Silver, 30, "Diego",    "Montoya");
+        AddMerchant(state, rng, "Prosperity",      ShipClass.Brig,       p.Bridgetown, f.England,     TradeGood.Sugar,  50, "Thomas",   "Hartwell");
+        AddMerchant(state, rng, "Volendammer",     ShipClass.Brig,       p.Willemstad, f.Netherlands, TradeGood.Cloth,  40, "Pieter",   "van Houten");
+        AddMerchant(state, rng, "Belle Étoile",    ShipClass.Brigantine, p.Martinique, f.France,      TradeGood.Indigo, 25, "Étienne",  "Moreau");
 
         // A colonial patrol frigate
         AddPatrol(state, "HMS Resolute",     ShipClass.Frigate, p.PortRoyal,   f.England);
         AddPatrol(state, "San Felipe",       ShipClass.Frigate, p.Havana,      f.Spain);
     }
 
-    private static void AddMerchant(WorldState state, string name, ShipClass cls,
-        PortId portId, FactionId? faction, TradeGood cargo, int cargoQty)
+    private static void AddMerchant(WorldState state, Random rng, string name, ShipClass cls,
+        PortId portId, FactionId? faction, TradeGood cargo, int cargoQty,
+        string? captainFirst = null, string? captainLast = null)
     {
         var id = ShipId.New();
         var ship = new Ship
@@ -657,6 +661,25 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             port.DockedShips.Add(id);
         if (faction.HasValue)
             state.Factions[faction.Value].ControlledPorts.Contains(portId);
+
+        // Create a named captain Individual (Individual-first model).
+        // The captain's IndividualHolder accumulates knowledge from ports they visit,
+        // enabling knowledge-gated routing decisions in ShipMovementSystem.AssignNpcRoute().
+        if (captainFirst is not null && captainLast is not null)
+        {
+            var captainId = IndividualId.New();
+            state.Individuals[captainId] = new Individual
+            {
+                Id           = captainId,
+                FirstName    = captainFirst,
+                LastName     = captainLast,
+                Role         = IndividualRole.PortMerchant,
+                FactionId    = faction,
+                LocationPortId = portId,
+                Personality  = PersonalityTraits.Random(rng),
+            };
+            ship.CaptainId = captainId;
+        }
     }
 
     private static void AddPatrol(WorldState state, string name, ShipClass cls,

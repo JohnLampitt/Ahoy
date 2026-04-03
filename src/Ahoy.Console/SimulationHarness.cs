@@ -183,6 +183,8 @@ public sealed class SimulationHarness
                 QuestResolved qr           => qr.Status == Ahoy.Simulation.Quests.QuestStatus.Completed
                     ? $"📜 Quest resolved ({qr.ChosenBranchId}): {qr.Title}"
                     : $"📜 Quest expired: {qr.Title}",
+                KnowledgeConflictDetected kcd => $"⚠  Knowledge conflict: {kcd.SubjectKey}",
+                DeceptionExposed de        => $"🔍 Deception exposed (faction: {FactionName(de.DeceivingFactionId)})",
                 _                          => null,   // suppress other noise
             };
 

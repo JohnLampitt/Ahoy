@@ -157,7 +157,10 @@ public sealed class FactionSystem : IWorldSystem
                 if (faction.ActiveGoals.Count >= MaxActiveGoals) break;
                 candidate.Utility = ScoreGoal(candidate, faction, state);
                 if (candidate.Utility >= GoalAdoptThreshold)
+                {
                     faction.ActiveGoals.Add(candidate);
+                    SeedIntentionFact(candidate, factionId, state, context.TickNumber);
+                }
             }
         }
     }
@@ -258,6 +261,41 @@ public sealed class FactionSystem : IWorldSystem
             state.Knowledge.MarkSuperseded(new PortHolder(port.Id), fact, context.TickNumber);
             state.Knowledge.AddFact(new PortHolder(port.Id), fact);
         }
+    }
+
+    /// <summary>
+    /// Seeds a FactionIntentionClaim into the faction's own knowledge pool when a new goal
+    /// is adopted. Sensitivity = Secret — it does not propagate passively and can only be
+    /// obtained by active investigation, a broker, or a faction betrayal.
+    /// Future quest templates can trigger on known faction intentions.
+    /// </summary>
+    private static void SeedIntentionFact(FactionGoal goal, FactionId factionId,
+        WorldState state, int tick)
+    {
+        var summary = goal.GetType().Name switch
+        {
+            "ExpandTerritory"    => "Expanding naval presence into new territory",
+            "SuppressPiracy"     => "Conducting anti-piracy operations",
+            "BuildNavy"          => "Building naval strength",
+            "AccumulateTreasury" => "Consolidating treasury reserves",
+            "RaidShippingLane"   => "Raiding merchant shipping lanes",
+            "EstablishHaven"     => "Establishing a pirate haven",
+            _                    => "Pursuing undisclosed strategic objectives",
+        };
+
+        var fact = new KnowledgeFact
+        {
+            Claim          = new FactionIntentionClaim(factionId, summary),
+            Sensitivity    = KnowledgeSensitivity.Secret,
+            Confidence     = 0.90f,
+            BaseConfidence = 0.90f,
+            ObservedDate   = state.Date,
+            SourceHolder   = new FactionHolder(factionId),
+        };
+        // Secret — seed only to the faction's own intelligence pool.
+        // 0% passive propagation means it cannot spread without active extraction.
+        state.Knowledge.MarkSuperseded(new FactionHolder(factionId), fact, tick);
+        state.Knowledge.AddFact(new FactionHolder(factionId), fact);
     }
 
     /// <summary>
