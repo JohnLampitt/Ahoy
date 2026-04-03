@@ -100,6 +100,14 @@ public sealed class KnowledgeFact
     public bool IsDecayExempt { get; init; }
 
     /// <summary>
+    /// The Individual who originally injected this fact as disinformation.
+    /// Immutable; set only at injection time. Null for all organically-observed facts.
+    /// Preserved on propagation so burning can trace planted lies regardless of how
+    /// many PortHolders the fact passed through.
+    /// </summary>
+    public IndividualId? OriginatingAgentId { get; init; }
+
+    /// <summary>
     /// Returns a canonical key identifying what this fact is about.
     /// Two facts with the same subject key held by the same holder supersede each other.
     /// </summary>

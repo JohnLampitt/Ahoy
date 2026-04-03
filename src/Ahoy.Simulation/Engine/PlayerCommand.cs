@@ -33,6 +33,14 @@ public record ProvideintelCommand(
 public record BuyKnowledgeCommand(
     IndividualId BrokerId, Core.Ids.KnowledgeFactId FactId, int Price) : PlayerCommand;
 
+public record InvestigateLocalCommand(string SubjectKey) : PlayerCommand;
+
+public record InvestigateRemoteCommand(string SubjectKey, int GoldCost) : PlayerCommand;
+
+public record SellFactCommand(IndividualId BrokerId, Core.Ids.KnowledgeFactId FactId) : PlayerCommand;
+
+public record BurnAgentCommand(IndividualId AgentId) : PlayerCommand;
+
 // ---- Quests ----
 
 public record ChooseQuestBranchCommand(

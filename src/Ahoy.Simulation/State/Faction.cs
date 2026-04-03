@@ -50,6 +50,16 @@ public sealed class Faction
 
     /// <summary>Haven presence by region 0–100.</summary>
     public Dictionary<RegionId, float> HavenPresence { get; } = new();
+
+    // --- Intelligence ---
+    /// <summary>
+    /// Intelligence capability 0..1. Clamped [0.10, 0.95].
+    /// Effects: (1) disinformation BaseConfidence = 0.70 + cap*0.25;
+    /// (2) gates DeceptionExposed detection (roll > cap to detect);
+    /// (3) reduces remote investigation yield against this faction.
+    /// Mutated by FactionSystem: +0.005/tick on EspionageGoal; -0.05 on DeceptionExposed.
+    /// </summary>
+    public float IntelligenceCapability { get; set; } = 0.30f;
 }
 
 // ---- Goal hierarchy ----
@@ -68,3 +78,4 @@ public record AccumulateTreasury : FactionGoal;
 public record NegotiateTreaty(FactionId TargetFaction) : FactionGoal;
 public record RaidShippingLane(RegionId TargetRegion) : FactionGoal;   // Pirate-specific
 public record EstablishHaven(PortId TargetPort) : FactionGoal;          // Pirate-specific
+public record EspionageGoal : FactionGoal;              // drives intelligence operations

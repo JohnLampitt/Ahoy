@@ -34,6 +34,12 @@ public sealed class WorldState
     /// </summary>
     public Queue<FactionStimulus> PendingFactionStimuli { get; } = new();
 
+    /// <summary>
+    /// Remote investigation requests queued by InvestigateRemoteCommand.
+    /// EventPropagationSystem resolves each when CurrentTick >= ResolvesOnTick.
+    /// </summary>
+    public List<PendingInvestigation> PendingInvestigations { get; } = new();
+
     // ---- Helpers ----
 
     public Region GetRegion(RegionId id) => Regions[id];
@@ -58,4 +64,17 @@ public sealed class WorldState
             _ => null,
         };
     }
+}
+
+/// <summary>
+/// An in-flight remote investigation request queued by InvestigateRemoteCommand.
+/// Resolved by EventPropagationSystem after a fixed delay.
+/// </summary>
+public sealed class PendingInvestigation
+{
+    public required string SubjectKey { get; init; }
+    public required int GoldCost { get; init; }
+    public required int SubmittedOnTick { get; init; }
+    /// <summary>Resolution tick = SubmittedOnTick + 5.</summary>
+    public int ResolvesOnTick => SubmittedOnTick + 5;
 }

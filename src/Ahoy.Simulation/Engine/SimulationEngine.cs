@@ -266,6 +266,181 @@ public sealed class SimulationEngine
                     Core.Enums.SimulationLod.Local);
                 _state.Quests.Resolve(quest);
                 break;
+
+            case InvestigateLocalCommand local:
+            {
+                // Prior-fact gate: player must already know something about this subject
+                var priorFact = _state.Knowledge.GetFacts(new State.PlayerHolder())
+                    .FirstOrDefault(f => !f.IsSuperseded
+                        && KnowledgeFact.GetSubjectKey(f.Claim) == local.SubjectKey);
+                if (priorFact is null) break;
+
+                // Player must be at a port
+                var playerShip = _state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
+                if (playerShip?.Location is not State.AtPort localAtPort) break;
+
+                // Find the best matching fact in the current port's knowledge pool
+                var portFact = _state.Knowledge.GetFacts(new State.PortHolder(localAtPort.Port))
+                    .Where(f => !f.IsSuperseded
+                        && KnowledgeFact.GetSubjectKey(f.Claim) == local.SubjectKey)
+                    .OrderByDescending(f => f.Confidence)
+                    .FirstOrDefault();
+
+                if (portFact != null)
+                {
+                    var observed = new State.KnowledgeFact
+                    {
+                        Claim = portFact.Claim,
+                        Sensitivity = portFact.Sensitivity,
+                        Confidence = 0.90f,
+                        BaseConfidence = 0.90f,
+                        ObservedDate = _state.Date,
+                        HopCount = 0,
+                        SourceHolder = null,
+                        OriginatingAgentId = portFact.OriginatingAgentId,
+                    };
+                    _state.Knowledge.MarkSuperseded(new State.PlayerHolder(), observed, _tickNumber);
+                    _state.Knowledge.AddFact(new State.PlayerHolder(), observed);
+                    _emitter.Emit(new Events.InvestigationResolved(_state.Date, Core.Enums.SimulationLod.Local,
+                        local.SubjectKey, observed.Id, true), Core.Enums.SimulationLod.Local);
+                }
+                else
+                {
+                    _emitter.Emit(new Events.InvestigationResolved(_state.Date, Core.Enums.SimulationLod.Local,
+                        local.SubjectKey, null, false), Core.Enums.SimulationLod.Local);
+                }
+                break;
+            }
+
+            case InvestigateRemoteCommand remote:
+            {
+                // Prior-fact gate
+                var hasPrior = _state.Knowledge.GetFacts(new State.PlayerHolder())
+                    .Any(f => !f.IsSuperseded
+                        && KnowledgeFact.GetSubjectKey(f.Claim) == remote.SubjectKey);
+                if (!hasPrior) break;
+
+                if (_state.Player.PersonalGold < remote.GoldCost) break;
+
+                _state.Player.PersonalGold -= remote.GoldCost;
+                _state.PendingInvestigations.Add(new State.PendingInvestigation
+                {
+                    SubjectKey = remote.SubjectKey,
+                    GoldCost = remote.GoldCost,
+                    SubmittedOnTick = _tickNumber,
+                });
+                break;
+            }
+
+            case SellFactCommand sell:
+            {
+                // Find broker
+                if (!_state.Individuals.TryGetValue(sell.BrokerId, out var broker)) break;
+                if (broker.Role != Core.Enums.IndividualRole.KnowledgeBroker) break;
+                if (!broker.IsAlive || broker.IsCompromised) break;
+
+                // Broker must be at the same port as the player
+                var playerShipForSell = _state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
+                if (playerShipForSell?.Location is not State.AtPort sellFactAtPort) break;
+                if (broker.LocationPortId != sellFactAtPort.Port) break;
+
+                // Find the fact in player's knowledge
+                var playerFact = _state.Knowledge.GetFacts(new State.PlayerHolder())
+                    .FirstOrDefault(f => f.Id == sell.FactId && !f.IsSuperseded);
+                if (playerFact is null) break;
+
+                // Confidence floor
+                if (playerFact.Confidence < 0.60f) break;
+
+                // Deduplication: broker must not already have a better version
+                var brokerHolder = new State.IndividualHolder(sell.BrokerId);
+                var subjectKey = KnowledgeFact.GetSubjectKey(playerFact.Claim);
+                var brokerExisting = _state.Knowledge.GetFacts(brokerHolder)
+                    .FirstOrDefault(f => !f.IsSuperseded
+                        && KnowledgeFact.GetSubjectKey(f.Claim) == subjectKey);
+                if (brokerExisting != null && brokerExisting.Confidence >= playerFact.Confidence) break;
+
+                // Price: draw from faction treasury
+                if (!broker.FactionId.HasValue) break;
+                if (!_state.Factions.TryGetValue(broker.FactionId.Value, out var brokerFaction)) break;
+
+                var price = playerFact.Sensitivity switch
+                {
+                    Core.Enums.KnowledgeSensitivity.Public  => 50,
+                    Core.Enums.KnowledgeSensitivity.Restricted => 150,
+                    Core.Enums.KnowledgeSensitivity.Secret => 300,
+                    _ => 50,
+                };
+                price = (int)(price * playerFact.Confidence); // scale by confidence
+
+                if (brokerFaction.TreasuryGold < price) break;
+                brokerFaction.TreasuryGold -= price;
+                _state.Player.PersonalGold += price;
+
+                // Copy fact to broker's IndividualHolder
+                var brokerCopy = new State.KnowledgeFact
+                {
+                    Claim = playerFact.Claim,
+                    Sensitivity = playerFact.Sensitivity,
+                    Confidence = playerFact.Confidence * 0.85f, // slight discount for second-hand
+                    BaseConfidence = playerFact.Confidence * 0.85f,
+                    ObservedDate = playerFact.ObservedDate,
+                    IsDisinformation = playerFact.IsDisinformation,
+                    HopCount = playerFact.HopCount + 1,
+                    SourceHolder = new State.PlayerHolder(),
+                    OriginatingAgentId = playerFact.OriginatingAgentId,
+                };
+                if (brokerExisting != null)
+                    _state.Knowledge.MarkSuperseded(brokerHolder, brokerCopy, _tickNumber);
+                _state.Knowledge.AddFact(brokerHolder, brokerCopy);
+                break;
+            }
+
+            case BurnAgentCommand burn:
+            {
+                if (!_state.Individuals.TryGetValue(burn.AgentId, out var target)) break;
+                if (!target.IsAlive || target.IsCompromised) break;
+
+                // Player must have a fact that traces back to this agent
+                var hasLinkedFact = _state.Knowledge.GetFacts(new State.PlayerHolder())
+                    .Any(f => !f.IsSuperseded && f.OriginatingAgentId == burn.AgentId);
+                if (!hasLinkedFact) break;
+
+                // Burn the agent
+                target.IsCompromised = true;
+
+                // Penalise the agent's entire IndividualHolder inventory
+                foreach (var fact in _state.Knowledge.GetFacts(new State.IndividualHolder(burn.AgentId)))
+                    fact.Confidence = Math.Max(0f, fact.Confidence - 0.30f);
+
+                // Emit event
+                var owningFaction = target.FactionId
+                    ?? _state.Factions.Keys.FirstOrDefault();
+                if (target.FactionId.HasValue)
+                {
+                    _emitter.Emit(new Events.AgentBurned(_state.Date, Core.Enums.SimulationLod.Local,
+                        burn.AgentId, target.FactionId.Value), Core.Enums.SimulationLod.Local);
+                }
+
+                // Seed public rumour in agent's current port
+                if (target.LocationPortId.HasValue)
+                {
+                    var assetExposed = new State.KnowledgeFact
+                    {
+                        Claim = new State.CustomClaim("AssetExposed",
+                            $"{target.FullName} was exposed as a spy"),
+                        Sensitivity = Core.Enums.KnowledgeSensitivity.Restricted,
+                        Confidence = 0.85f,
+                        BaseConfidence = 0.85f,
+                        ObservedDate = _state.Date,
+                        HopCount = 0,
+                        SourceHolder = null,
+                    };
+                    _state.Knowledge.AddFact(
+                        new State.PortHolder(target.LocationPortId.Value), assetExposed);
+                }
+                break;
+            }
         }
     }
 

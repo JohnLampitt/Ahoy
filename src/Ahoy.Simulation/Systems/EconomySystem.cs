@@ -14,6 +14,8 @@ namespace Ahoy.Simulation.Systems;
 /// </summary>
 public sealed class EconomySystem : IWorldSystem
 {
+    private const float CaptainIncomeFraction = 0.10f;
+
     private readonly Random _rng;
 
     public EconomySystem(Random? rng = null)
@@ -133,6 +135,14 @@ public sealed class EconomySystem : IWorldSystem
             economy.Demand[good] -= sellQty;
 
             ship.GoldOnBoard += price * sellQty;
+
+            // Credit captain's personal wealth: 10% of trade revenue
+            if (ship.CaptainId.HasValue
+                && state.Individuals.TryGetValue(ship.CaptainId.Value, out var captain))
+            {
+                captain.CurrentGold += (int)((price * sellQty) * CaptainIncomeFraction);
+            }
+
             events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, sellQty, price, false), lod);
         }
 

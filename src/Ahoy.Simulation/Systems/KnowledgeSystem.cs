@@ -61,6 +61,9 @@ public sealed class KnowledgeSystem : IWorldSystem
         // 2. Propagate facts via ships arriving in port this tick
         PropagateViaArrivingShips(state, context, tick);
 
+        // 2b. Brokers passively absorb high-confidence port facts
+        SkimBrokerFacts(state, tick);
+
         // 3. Generate first-hand observations when the player ship arrives at a port
         GeneratePlayerObservations(state, tick);
 
@@ -206,6 +209,49 @@ public sealed class KnowledgeSystem : IWorldSystem
         }
     }
 
+    /// <summary>
+    /// Brokers passively absorb high-confidence facts from their current port.
+    /// This keeps their inventory alive after the initial world-creation bootstrap.
+    /// Only absorbs facts above the 0.65 confidence threshold to prevent accumulating noise.
+    /// </summary>
+    private static void SkimBrokerFacts(WorldState state, int tick)
+    {
+        foreach (var individual in state.Individuals.Values)
+        {
+            if (!individual.IsAlive || individual.IsCompromised) continue;
+            if (individual.Role != Core.Enums.IndividualRole.KnowledgeBroker) continue;
+            if (!individual.LocationPortId.HasValue) continue;
+
+            var portHolder = new PortHolder(individual.LocationPortId.Value);
+            var brokerHolder = new IndividualHolder(individual.Id);
+            var brokerFacts = state.Knowledge.GetFacts(brokerHolder);
+
+            foreach (var fact in state.Knowledge.GetFacts(portHolder))
+            {
+                if (fact.IsSuperseded || fact.Confidence <= 0.65f) continue;
+
+                var subjectKey = KnowledgeFact.GetSubjectKey(fact.Claim);
+                var alreadyKnows = brokerFacts.Any(f =>
+                    !f.IsSuperseded && KnowledgeFact.GetSubjectKey(f.Claim) == subjectKey);
+                if (alreadyKnows) continue;
+
+                var skimmed = new KnowledgeFact
+                {
+                    Claim = fact.Claim,
+                    Sensitivity = fact.Sensitivity,
+                    Confidence = fact.Confidence * (1f - HopPenaltyFraction),
+                    BaseConfidence = fact.Confidence * (1f - HopPenaltyFraction),
+                    ObservedDate = fact.ObservedDate,
+                    IsDisinformation = fact.IsDisinformation,
+                    HopCount = fact.HopCount + 1,
+                    SourceHolder = portHolder,
+                    OriginatingAgentId = fact.OriginatingAgentId,
+                };
+                state.Knowledge.AddFact(brokerHolder, skimmed);
+            }
+        }
+    }
+
     private void ShareFacts(KnowledgeHolderId from, KnowledgeHolderId to, WorldState state, int tick,
         bool excludeSecrets = false)
     {
@@ -239,6 +285,7 @@ public sealed class KnowledgeSystem : IWorldSystem
                     IsDisinformation = fact.IsDisinformation,
                     HopCount = fact.HopCount + 1,
                     SourceHolder = from,
+                    OriginatingAgentId = fact.OriginatingAgentId,
                 };
                 AddAndSupersede(state.Knowledge, to, propagated, tick);
             }
@@ -277,6 +324,7 @@ public sealed class KnowledgeSystem : IWorldSystem
                     IsDisinformation = fact.IsDisinformation,
                     HopCount = fact.HopCount + 1,
                     SourceHolder = from,
+                    OriginatingAgentId = fact.OriginatingAgentId,
                 };
                 var isNewConflict = state.Knowledge.AddFact(to, contradicting); // no supersession — both live
                 if (isNewConflict)
