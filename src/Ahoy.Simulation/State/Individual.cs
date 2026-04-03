@@ -17,6 +17,12 @@ public sealed class Individual
     /// <summary>Current port they're based at (null = at sea / unknown).</summary>
     public PortId? LocationPortId { get; set; }
 
+    /// <summary>The port this individual calls home and returns to after tours. Null for nomadic individuals (pirates, brokers).</summary>
+    public PortId? HomePortId { get; set; }
+
+    /// <summary>Non-null while on an inspection/diplomatic tour. Counts down each tick; at 0 the individual returns home.</summary>
+    public int? TourTicksRemaining { get; set; }
+
     /// <summary>
     /// Authority 0–100. Governors with high authority enforce laws effectively.
     /// Authority is a cascade target in EventPropagation (PoliticalRules).

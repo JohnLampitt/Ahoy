@@ -29,7 +29,17 @@ public sealed class KnowledgeSystem : IWorldSystem
     // Multiplicative hop penalty: 15% reduction per retelling.
     // A 0.20-confidence fact drops to 0.17, not 0.10 — stays above pruning floor.
     private const float HopPenaltyFraction  = 0.15f;
-    private const float PropagationChance   = 0.30f;
+    // Sensitivity-gated propagation: Public/Disinformation spread freely, Restricted rarely, Secret never.
+    // Eliminates the need for an active per-tick suppression pass (O(N) nightmare).
+    // Use PropagationChanceFor(sensitivity) instead of this constant.
+    private static float PropagationChanceFor(KnowledgeSensitivity sensitivity) => sensitivity switch
+    {
+        KnowledgeSensitivity.Public         => 0.30f,
+        KnowledgeSensitivity.Restricted     => 0.10f,
+        KnowledgeSensitivity.Secret         => 0.00f,   // never spreads passively
+        KnowledgeSensitivity.Disinformation => 0.30f,   // false facts spread freely by design
+        _                                   => 0.30f,
+    };
     // Bayesian corroboration weight: diminishing-returns confidence update.
     private const float CorroborationWeight = 0.50f;
 
@@ -140,6 +150,25 @@ public sealed class KnowledgeSystem : IWorldSystem
                 if (worldEvent.SourceLod == SimulationLod.Local)
                     AddAndSupersede(state.Knowledge, new PlayerHolder(), weatherFact, tick);
                 break;
+
+            case IndividualMoved im:
+                // Direct observation of an individual's movement.
+                // Seeded ONLY into the departure and arrival port pools — not faction-wide.
+                // This creates geographical information asymmetry: you must visit (or hear
+                // from ships that visited) those ports to learn where they've gone.
+                var movedFact = new KnowledgeFact
+                {
+                    Claim          = new IndividualWhereaboutsClaim(im.IndividualId, im.ToPort),
+                    Sensitivity    = KnowledgeSensitivity.Public,
+                    Confidence     = 0.90f,
+                    BaseConfidence = 0.90f,
+                    ObservedDate   = im.Date,
+                    HopCount       = 0,
+                    SourceHolder   = null,
+                };
+                AddAndSupersede(state.Knowledge, new PortHolder(im.FromPort), movedFact, tick);
+                AddAndSupersede(state.Knowledge, new PortHolder(im.ToPort),   movedFact, tick);
+                break;
         }
     }
 
@@ -171,7 +200,8 @@ public sealed class KnowledgeSystem : IWorldSystem
         foreach (var fact in sourceFacts)
         {
             if (fact.IsSuperseded) continue;   // don't gossip stale beliefs
-            if (_rng.NextDouble() > PropagationChance) continue;
+            var propChance = PropagationChanceFor(fact.Sensitivity);
+            if (propChance == 0f || _rng.NextDouble() > propChance) continue;
 
             // Multiplicative hop penalty scaled by source reliability
             var reliability = state.Knowledge.GetSourceReliability(from);

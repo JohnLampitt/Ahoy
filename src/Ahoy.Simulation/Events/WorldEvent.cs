@@ -113,6 +113,12 @@ public record IndividualDied(
     WorldDate Date, SimulationLod SourceLod,
     IndividualId IndividualId, string Cause) : WorldEvent(Date, SourceLod);
 
+public record IndividualMoved(
+    WorldDate Date, SimulationLod SourceLod,
+    IndividualId IndividualId,
+    PortId FromPort,
+    PortId ToPort) : WorldEvent(Date, SourceLod);
+
 // ---- Quest events ----
 
 public record QuestActivated(

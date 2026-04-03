@@ -64,13 +64,14 @@ public sealed class SimulationEngine
 
         var systems = new List<IWorldSystem>
         {
-            new WeatherSystem(rng),                                        // Step 1
-            new ShipMovementSystem(rng),                                   // Step 2
-            new EconomySystem(rng),                                        // Step 3
-            new FactionSystem(rng),                                        // Step 4
-            new EventPropagationSystem(emitter),                           // Step 5
-            new KnowledgeSystem(emitter, rng),                             // Step 6
-            new QuestSystem(questTemplates ?? Array.Empty<QuestTemplate>()), // Step 7
+            new WeatherSystem(rng),                                          // Step 1
+            new ShipMovementSystem(rng),                                     // Step 2
+            new EconomySystem(rng),                                          // Step 3
+            new FactionSystem(rng),                                          // Step 4
+            new IndividualLifecycleSystem(rng),                              // Step 5
+            new EventPropagationSystem(emitter),                             // Step 6
+            new KnowledgeSystem(emitter, rng),                               // Step 7
+            new QuestSystem(questTemplates ?? Array.Empty<QuestTemplate>()), // Step 8
         };
 
         return new SimulationEngine(state, commandQueue, emitter, systems, decisionQueue);
@@ -202,16 +203,50 @@ public sealed class SimulationEngine
                     .FirstOrDefault(b => b.BranchId == qb.BranchId
                         && (b.AvailabilityCondition is null || b.AvailabilityCondition(playerFacts)));
                 if (branch is null) break;
+
+                // Disinformation check: if trigger facts were planted, the player acted on false intel.
+                // Inject correcting observations so the epistemic state self-heals without flag leakage.
+                var disinfoFacts = quest.TriggerFacts.Where(f => f.IsDisinformation).ToList();
+                var resolvedStatus = disinfoFacts.Count > 0 ? QuestStatus.Failed : QuestStatus.Completed;
+                foreach (var df in disinfoFacts)
+                    InjectDisinformationCorrection(df, _state, _tickNumber);
+
                 quest.ChosenBranch = branch;
-                quest.Status       = QuestStatus.Completed;
+                quest.Status       = resolvedStatus;
                 quest.ResolvedDate = _state.Date;
                 foreach (var ev in branch.OutcomeEvents(_state))
                     _emitter.Emit(ev, ev.SourceLod);
                 ApplyOutcomeActions(branch.OutcomeActions, quest, _state, _tickNumber);
+
+                // Auto-emit PlayerActionClaim — world-observable record of the player's choice.
+                // Faction systems read FactionHolder's knowledge pool to update standings;
+                // they do NOT get magic direct notification.
+                var playerPortForAction = (_state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip)?.Location
+                    as State.AtPort)?.Port;
+                var actionFact = new State.KnowledgeFact
+                {
+                    Claim          = new State.PlayerActionClaim(quest.Template.Id.Value, branch.BranchId, playerPortForAction),
+                    Sensitivity    = Core.Enums.KnowledgeSensitivity.Restricted,
+                    Confidence     = 1.0f,
+                    BaseConfidence = 1.0f,
+                    ObservedDate   = _state.Date,
+                    HopCount       = 0,
+                    SourceHolder   = null,
+                };
+                _state.Knowledge.AddFact(new State.PlayerHolder(), actionFact);
+                if (playerPortForAction.HasValue)
+                    _state.Knowledge.AddFact(new State.PortHolder(playerPortForAction.Value), actionFact);
+
+                // Cooldown: suppress re-triggering this quest/subject for 20 ticks
+                var actionSubjectKey = quest.TriggerFacts.Count > 0
+                    ? KnowledgeFact.GetSubjectKey(quest.TriggerFacts[0].Claim)
+                    : quest.Template.Id.Value;
+                _state.Quests.RecordCooldown(quest.Template.Id, actionSubjectKey, _state.Date.Advance(20));
+
                 _emitter.Emit(new QuestResolved(
                     _state.Date, Core.Enums.SimulationLod.Local,
                     quest.Template.Id.Value, quest.Id.ToString(),
-                    quest.Title, QuestStatus.Completed, branch.BranchId),
+                    quest.Title, resolvedStatus, branch.BranchId),
                     Core.Enums.SimulationLod.Local);
                 _state.Quests.Resolve(quest);
                 break;
@@ -259,6 +294,57 @@ public sealed class SimulationEngine
                     break;
             }
         }
+    }
+
+    /// <summary>
+    /// When the player acts on a disinformation fact, inject a correcting observation
+    /// into their knowledge store. This creates a KnowledgeConflict (or supersedes the lie)
+    /// without ever leaking the IsDisinformation flag to the UI.
+    /// Also degrades the injecting source's reliability.
+    /// </summary>
+    private void InjectDisinformationCorrection(State.KnowledgeFact lie, WorldState state, int tick)
+    {
+        State.KnowledgeFact correction;
+
+        if (lie.Claim is State.ShipLocationClaim slc
+            && state.Ships.TryGetValue(slc.Ship, out var actualShip))
+        {
+            // The ship IS somewhere — reveal its actual location as a direct observation.
+            correction = new State.KnowledgeFact
+            {
+                Claim          = new State.ShipLocationClaim(slc.Ship, actualShip.Location),
+                Sensitivity    = Core.Enums.KnowledgeSensitivity.Public,
+                Confidence     = 0.90f,
+                BaseConfidence = 0.90f,
+                ObservedDate   = state.Date,
+                HopCount       = 0,
+                SourceHolder   = null,
+            };
+        }
+        else
+        {
+            // Generic refutation for other claim types — marks the subject as contested.
+            correction = new State.KnowledgeFact
+            {
+                Claim          = new State.CustomClaim("Disinformation",
+                                     $"The intelligence about '{lie.Claim.GetType().Name.Replace("Claim", "")}' proved false."),
+                Sensitivity    = Core.Enums.KnowledgeSensitivity.Public,
+                Confidence     = 0.90f,
+                BaseConfidence = 0.90f,
+                ObservedDate   = state.Date,
+                HopCount       = 0,
+                SourceHolder   = null,
+            };
+            // Also supersede the original lie so it doesn't keep triggering quests.
+            state.Knowledge.MarkSuperseded(new State.PlayerHolder(), lie, tick);
+        }
+
+        // Adding the correction triggers KnowledgeConflict detection in the store.
+        state.Knowledge.AddFact(new State.PlayerHolder(), correction);
+
+        // Degrade the reliability of whatever source passed this to the player.
+        if (lie.SourceHolder is not null)
+            state.Knowledge.RecordSourceOutcome(lie.SourceHolder, wasAccurate: false);
     }
 
     private static void ApplyCompletedDecision(ActorDecisionRequest request)

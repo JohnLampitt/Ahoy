@@ -25,6 +25,7 @@ public record FactionIntentionClaim(FactionId Faction, string IntentionSummary) 
 public record WeatherClaim(RegionId Region, WindStrength Wind, StormPresence Storm) : KnowledgeClaim;
 public record RouteHazardClaim(RegionId From, RegionId To, string Description) : KnowledgeClaim;
 public record IndividualWhereaboutsClaim(IndividualId Individual, PortId? Port) : KnowledgeClaim;
+public record PlayerActionClaim(string QuestTemplateId, string BranchId, PortId? Location) : KnowledgeClaim;
 public record CustomClaim(string Subject, string Detail) : KnowledgeClaim;
 
 // ---- KnowledgeFact ----
@@ -98,6 +99,8 @@ public sealed class KnowledgeFact
         WeatherClaim c             => $"Weather:{c.Region.Value}",
         RouteHazardClaim c         => $"RouteHazard:{c.From.Value}:{c.To.Value}",
         IndividualWhereaboutsClaim c => $"IndividualWhereabouts:{c.Individual.Value}",
+        // Each distinct quest resolution is its own subject — two A1 completions on different ships don't supersede each other.
+        PlayerActionClaim c        => $"PlayerAction:{c.QuestTemplateId}:{c.BranchId}",
         CustomClaim c              => $"Custom:{c.Subject}",
         _                          => claim.GetType().Name,
     };
