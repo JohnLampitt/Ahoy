@@ -161,18 +161,46 @@ public sealed class ShipMovementSystem : IWorldSystem
 
     private void AssignNpcRoute(Ship ship, RegionId currentRegion, WorldState state)
     {
-        // Pick a random port in an adjacent region or the same region
-        var candidate = GetRandomAccessiblePort(currentRegion, state);
-        if (candidate.HasValue)
+        // Determine epistemic agent: named captain uses personal knowledge (IndividualHolder);
+        // uncaptained ships use crew collective knowledge (ShipHolder).
+        // This is the Option B placeholder: Individual-first routing without full merchant lifecycle.
+        KnowledgeHolderId agentHolder = ship.CaptainId.HasValue
+            ? new IndividualHolder(ship.CaptainId.Value)
+            : new ShipHolder(ship.Id);
+
+        // Find the highest-confidence known port that is accessible from current region.
+        // Agent routes toward what they know, not what is objectively best.
+        var accessiblePortIds = GetAccessiblePortIds(currentRegion, state);
+        var best = state.Knowledge.GetFacts(agentHolder)
+            .Where(f => !f.IsSuperseded && f.Claim is PortPriceClaim pc
+                        && accessiblePortIds.Contains(pc.Port))
+            .OrderByDescending(f => f.Confidence)
+            .Select(f => (PortId?)((PortPriceClaim)f.Claim).Port)
+            .FirstOrDefault();
+
+        // Fallback: random accessible port when agent holds no price knowledge.
+        // Random is correct for zero-knowledge agents — not arbitrary but honest.
+        var candidate = best ?? GetRandomAccessiblePort(currentRegion, state);
+        if (!candidate.HasValue) return;
+
+        ship.RoutingDestination = candidate;
+        var nextRegion = FindNextRegion(currentRegion, state.Ports[candidate.Value].RegionId, state);
+        if (nextRegion.HasValue)
         {
-            ship.RoutingDestination = candidate;
-            var nextRegion = FindNextRegion(currentRegion, state.Ports[candidate.Value].RegionId, state);
-            if (nextRegion.HasValue)
-            {
-                var travelDays = GetTravelDays(currentRegion, nextRegion.Value, state);
-                ship.Location = new EnRoute(currentRegion, nextRegion.Value, 0f, travelDays);
-            }
+            var travelDays = GetTravelDays(currentRegion, nextRegion.Value, state);
+            ship.Location = new EnRoute(currentRegion, nextRegion.Value, 0f, travelDays);
         }
+    }
+
+    private HashSet<PortId> GetAccessiblePortIds(RegionId from, WorldState state)
+    {
+        var ids = new HashSet<PortId>();
+        if (!state.Regions.TryGetValue(from, out var region)) return ids;
+        foreach (var pid in region.Ports) ids.Add(pid);
+        foreach (var adj in region.AdjacentRegions)
+            if (state.Regions.TryGetValue(adj, out var adjRegion))
+                foreach (var pid in adjRegion.Ports) ids.Add(pid);
+        return ids;
     }
 
     private PortId? GetRandomAccessiblePort(RegionId from, WorldState state)

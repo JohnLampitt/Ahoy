@@ -186,20 +186,34 @@ public sealed class KnowledgeSystem : IWorldSystem
         {
             if (ship.Location is not AtPort atPort) continue;
 
-            var shipHolder = new ShipHolder(ship.Id);
             var portHolder = new PortHolder(atPort.Port);
+            var shipHolder = new ShipHolder(ship.Id);
 
-            ShareFacts(shipHolder, portHolder, state, tick);
-            ShareFacts(portHolder, shipHolder, state, tick);
+            // Captain (IndividualHolder) ↔ Port: all sensitivities.
+            // The captain is the epistemic agent — they pick up strategic and secret intel,
+            // and their personal accumulated knowledge informs routing decisions.
+            if (ship.CaptainId.HasValue)
+            {
+                var captainHolder = new IndividualHolder(ship.CaptainId.Value);
+                ShareFacts(captainHolder, portHolder, state, tick);
+                ShareFacts(portHolder, captainHolder, state, tick);
+            }
+
+            // Crew collective (ShipHolder) ↔ Port: Public + Restricted + Disinformation only.
+            // Crew absorb tavern gossip and spread rumours between ports, but don't handle secrets.
+            ShareFacts(shipHolder, portHolder, state, tick, excludeSecrets: true);
+            ShareFacts(portHolder, shipHolder, state, tick, excludeSecrets: true);
         }
     }
 
-    private void ShareFacts(KnowledgeHolderId from, KnowledgeHolderId to, WorldState state, int tick)
+    private void ShareFacts(KnowledgeHolderId from, KnowledgeHolderId to, WorldState state, int tick,
+        bool excludeSecrets = false)
     {
         var sourceFacts = state.Knowledge.GetFacts(from);
         foreach (var fact in sourceFacts)
         {
             if (fact.IsSuperseded) continue;   // don't gossip stale beliefs
+            if (excludeSecrets && fact.Sensitivity == KnowledgeSensitivity.Secret) continue;
             var propChance = PropagationChanceFor(fact.Sensitivity);
             if (propChance == 0f || _rng.NextDouble() > propChance) continue;
 
