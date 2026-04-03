@@ -40,8 +40,21 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
 
             if (individual.TourTicksRemaining is null)
             {
-                // At home — small chance to start a tour
-                if (_rng.NextDouble() >= TourStartChance) continue;
+                // At home — chance to start a tour, scaled by faction prosperity.
+                // Wealthy factions have more diplomatic activity; impoverished ones stay home.
+                // Floor at 0.5× ensures even broke factions occasionally travel.
+                var tourChance = TourStartChance;
+                if (individual.FactionId.HasValue
+                    && state.Factions.TryGetValue(individual.FactionId.Value, out var faction))
+                {
+                    var prosperityValues = faction.ControlledPorts
+                        .Where(pid => state.Ports.ContainsKey(pid))
+                        .Select(pid => (double)state.Ports[pid].Prosperity)
+                        .ToList();
+                    if (prosperityValues.Count > 0)
+                        tourChance *= Math.Max(0.5, prosperityValues.Average() / 100.0);
+                }
+                if (_rng.NextDouble() >= tourChance) continue;
 
                 if (PickTourDestination(homePort, individual.FactionId, state) is not { } dest)
                     continue;
@@ -72,20 +85,32 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
     }
 
     /// <summary>
-    /// Pick a tour destination: a faction-controlled port that isn't the individual's home.
-    /// Falls back to any port if no faction match found.
+    /// Pick a tour destination: a friendly faction-controlled port that isn't the individual's home.
+    /// Excludes ports where the individual's faction has a hostile relationship (relationship &lt; -25).
+    /// Falls back to any non-hostile port, then any port, if no faction match found.
     /// </summary>
     private PortId? PickTourDestination(PortId homePort, FactionId? factionId, WorldState state)
     {
         var candidates = state.Ports.Values
             .Where(p => p.Id != homePort)
             .Where(p => factionId == null || p.ControllingFactionId == factionId)
+            .Where(p => !IsHostile(factionId, p.ControllingFactionId, state))
             .Select(p => p.Id)
             .ToList();
 
         if (candidates.Count == 0)
         {
-            // Fallback: any port that isn't home
+            // Fallback: any non-hostile port that isn't home
+            candidates = state.Ports.Values
+                .Where(p => p.Id != homePort)
+                .Where(p => !IsHostile(factionId, p.ControllingFactionId, state))
+                .Select(p => p.Id)
+                .ToList();
+        }
+
+        if (candidates.Count == 0)
+        {
+            // Last resort: any port (shouldn't normally be reached)
             candidates = state.Ports.Values
                 .Where(p => p.Id != homePort)
                 .Select(p => p.Id)
@@ -94,5 +119,15 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
 
         if (candidates.Count == 0) return null;
         return candidates[_rng.Next(candidates.Count)];
+    }
+
+    /// <summary>Relationship below this threshold is considered hostile — governors won't travel there.</summary>
+    private const float HostileThreshold = -25f;
+
+    private static bool IsHostile(FactionId? traveller, FactionId? destination, WorldState state)
+    {
+        if (traveller is null || destination is null || traveller == destination) return false;
+        if (!state.Factions.TryGetValue(traveller.Value, out var faction)) return false;
+        return faction.Relationships.TryGetValue(destination.Value, out var rel) && rel < HostileThreshold;
     }
 }

@@ -234,10 +234,18 @@ public sealed class KnowledgeSystem : IWorldSystem
                 if (!Equals(existing.SourceHolder, from))
                 {
                     existing.CorroborationCount++;
-                    // Bayesian update: C_new = C_old + W * C_incoming * (1 - C_old)
-                    // Gives diminishing returns — can't rumour-chain to 1.0
-                    existing.Confidence = Math.Min(0.95f,
-                        existing.Confidence + CorroborationWeight * newConfidence * (1f - existing.Confidence));
+                    // Faction-origin guard: a faction's own echo chamber (multiple ports
+                    // all controlled by the same faction) can only boost confidence once.
+                    // Player / direct witness (null faction) always corroborates.
+                    var fromFaction = ResolveFactionId(from, state);
+                    var isNewFaction = fromFaction is null || existing.CorroboratingFactionIds.Add(fromFaction.Value);
+                    if (isNewFaction)
+                    {
+                        // Bayesian update: C_new = C_old + W * C_incoming * (1 - C_old)
+                        // Gives diminishing returns — can't rumour-chain to 1.0
+                        existing.Confidence = Math.Min(0.95f,
+                            existing.Confidence + CorroborationWeight * newConfidence * (1f - existing.Confidence));
+                    }
                 }
                 // Same source retelling → skip
             }
@@ -256,7 +264,12 @@ public sealed class KnowledgeSystem : IWorldSystem
                     HopCount = fact.HopCount + 1,
                     SourceHolder = from,
                 };
-                state.Knowledge.AddFact(to, contradicting); // no supersession — both live
+                var isNewConflict = state.Knowledge.AddFact(to, contradicting); // no supersession — both live
+                if (isNewConflict)
+                    _emitter.Emit(
+                        new KnowledgeConflictDetected(state.Date, SimulationLod.Local,
+                            subjectKey, existing.Id, contradicting.Id, to),
+                        SimulationLod.Local);
             }
         }
     }
@@ -336,8 +349,25 @@ public sealed class KnowledgeSystem : IWorldSystem
     private static void DegradeConfidence(WorldState state)
     {
         foreach (var fact in state.Knowledge.GetAllFacts())
+        {
+            if (fact.IsDecayExempt) continue;   // player's own action ledger never fades
             fact.Confidence = Math.Max(0f, fact.Confidence * DecayFactor);
+        }
     }
+
+    // ---- Helpers ----
+
+    /// <summary>
+    /// Resolve a KnowledgeHolderId to the FactionId that controls it, if any.
+    /// Used to gate corroboration: a single faction's echo chamber should only
+    /// boost confidence once, regardless of how many ports they control.
+    /// </summary>
+    private static FactionId? ResolveFactionId(KnowledgeHolderId holder, WorldState state) => holder switch
+    {
+        FactionHolder fh                                               => fh.Faction,
+        PortHolder ph when state.Ports.TryGetValue(ph.Port, out var p) => p.ControllingFactionId,
+        _                                                              => null,
+    };
 
     private static float LodToConfidence(SimulationLod lod) => lod switch
     {

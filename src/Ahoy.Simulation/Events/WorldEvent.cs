@@ -1,6 +1,7 @@
 using Ahoy.Core.Enums;
 using Ahoy.Core.Ids;
 using Ahoy.Core.ValueObjects;
+using Ahoy.Simulation.State;
 
 namespace Ahoy.Simulation.Events;
 
@@ -118,6 +119,30 @@ public record IndividualMoved(
     IndividualId IndividualId,
     PortId FromPort,
     PortId ToPort) : WorldEvent(Date, SourceLod);
+
+// ---- Intelligence events ----
+
+/// <summary>
+/// Emitted when InjectDisinformationCorrection fires — the player acted on planted
+/// false intel and the deception was exposed. The deceiving faction's FactionHolder
+/// is seeded with a corresponding CustomClaim so their future decision-making can react.
+/// </summary>
+public record DeceptionExposed(
+    WorldDate Date, SimulationLod SourceLod,
+    FactionId DeceivingFactionId,
+    PortId? ExposedAtPort) : WorldEvent(Date, SourceLod);
+
+/// <summary>
+/// Emitted by KnowledgeSystem when propagation creates a brand-new conflict between two
+/// facts held by the same actor about the same subject. Both facts coexist — neither is
+/// superseded. The QuestSystem (and future systems) can listen to this as a trigger.
+/// </summary>
+public record KnowledgeConflictDetected(
+    WorldDate Date, SimulationLod SourceLod,
+    string SubjectKey,
+    KnowledgeFactId FactAId,
+    KnowledgeFactId FactBId,
+    KnowledgeHolderId HolderId) : WorldEvent(Date, SourceLod);
 
 // ---- Quest events ----
 
