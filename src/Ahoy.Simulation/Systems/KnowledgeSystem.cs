@@ -22,9 +22,16 @@ public sealed class KnowledgeSystem : IWorldSystem
     private readonly TickEventEmitter _emitter;
     private readonly Random _rng;
 
-    private const float ConfidenceDecayPerTick = 0.015f;
-    private const float HopConfidencePenalty   = 0.10f;
-    private const float PropagationChance      = 0.30f;
+    // Exponential decay: multiply each tick. ≈ e^(-0.015) ≈ 0.9851.
+    // Matches old linear rate near 1.0 but produces asymptotic tail at low confidence,
+    // so old rumours linger as faint noise rather than hard-flooring to zero.
+    private const float DecayFactor         = 0.9851f;
+    // Multiplicative hop penalty: 15% reduction per retelling.
+    // A 0.20-confidence fact drops to 0.17, not 0.10 — stays above pruning floor.
+    private const float HopPenaltyFraction  = 0.15f;
+    private const float PropagationChance   = 0.30f;
+    // Bayesian corroboration weight: diminishing-returns confidence update.
+    private const float CorroborationWeight = 0.50f;
 
     public KnowledgeSystem(TickEventEmitter emitter, Random? rng = null)
     {
@@ -44,7 +51,10 @@ public sealed class KnowledgeSystem : IWorldSystem
         // 2. Propagate facts via ships arriving in port this tick
         PropagateViaArrivingShips(state, context, tick);
 
-        // 3. Degrade confidence on all existing facts
+        // 3. Generate first-hand observations when the player ship arrives at a port
+        GeneratePlayerObservations(state, tick);
+
+        // 4. Degrade confidence on all existing facts
         DegradeConfidence(state);
 
         // 4. Prune expired facts (keep superseded for one tick)
@@ -163,7 +173,9 @@ public sealed class KnowledgeSystem : IWorldSystem
             if (fact.IsSuperseded) continue;   // don't gossip stale beliefs
             if (_rng.NextDouble() > PropagationChance) continue;
 
-            var newConfidence = Math.Max(0f, fact.Confidence - HopConfidencePenalty);
+            // Multiplicative hop penalty scaled by source reliability
+            var reliability = state.Knowledge.GetSourceReliability(from);
+            var newConfidence = fact.Confidence * (1f - HopPenaltyFraction) * reliability;
             if (newConfidence <= 0.10f) continue;
 
             var subjectKey = KnowledgeFact.GetSubjectKey(fact.Claim);
@@ -188,13 +200,105 @@ public sealed class KnowledgeSystem : IWorldSystem
             }
             else if (existing.Claim == fact.Claim)
             {
-                // Same claim — corroboration if the source is different
+                // Same claim — corroborate if from a different source
                 if (!Equals(existing.SourceHolder, from))
+                {
                     existing.CorroborationCount++;
-                // Same source retelling → skip (no new information)
+                    // Bayesian update: C_new = C_old + W * C_incoming * (1 - C_old)
+                    // Gives diminishing returns — can't rumour-chain to 1.0
+                    existing.Confidence = Math.Min(0.95f,
+                        existing.Confidence + CorroborationWeight * newConfidence * (1f - existing.Confidence));
+                }
+                // Same source retelling → skip
             }
-            // Different claim (contradiction) — leave both facts active; future work to flag
+            else
+            {
+                // Different claim, same subject — contradiction
+                // Create the contradicting fact; KnowledgeStore.AddFact will register the conflict
+                var contradicting = new KnowledgeFact
+                {
+                    Claim = fact.Claim,
+                    Sensitivity = fact.Sensitivity,
+                    Confidence = newConfidence,
+                    BaseConfidence = newConfidence,
+                    ObservedDate = fact.ObservedDate,
+                    IsDisinformation = fact.IsDisinformation,
+                    HopCount = fact.HopCount + 1,
+                    SourceHolder = from,
+                };
+                state.Knowledge.AddFact(to, contradicting); // no supersession — both live
+            }
         }
+    }
+
+    // ---- Passive player investigation (arrival at port) ----
+
+    /// <summary>
+    /// When the player ship docks, generate direct-observation (HopCount=0, SourceHolder=null)
+    /// facts for the port's current real state. These facts are authoritative and will
+    /// supersede any stale or disinformation-seeded beliefs the player held.
+    /// Any existing player facts that are superseded by these observations feed back
+    /// into source reputation tracking.
+    /// </summary>
+    private static void GeneratePlayerObservations(WorldState state, int tick)
+    {
+        var playerShip = state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
+        if (playerShip is null || !playerShip.ArrivedThisTick) return;
+        if (playerShip.Location is not AtPort atPort) return;
+        if (!state.Ports.TryGetValue(atPort.Port, out var port)) return;
+
+        const float ObservationConfidence = 0.90f;
+        var player = new PlayerHolder();
+
+        // --- Port control: what faction actually controls this port? ---
+        var controlClaim = new PortControlClaim(port.Id, port.ControllingFactionId);
+        var controlFact = new KnowledgeFact
+        {
+            Claim = new PortControlClaim(port.Id, port.ControllingFactionId),
+            Sensitivity = KnowledgeSensitivity.Public,
+            Confidence = ObservationConfidence,
+            BaseConfidence = ObservationConfidence,
+            ObservedDate = state.Date,
+            HopCount = 0,
+            SourceHolder = null,
+        };
+        RecordOutcomeForSuperseded(state.Knowledge, player, controlFact);
+        AddAndSupersede(state.Knowledge, player, controlFact, tick);
+
+        // --- Port prices: actual effective prices for each good ---
+        foreach (var (good, _) in port.Economy.Supply)
+        {
+            var price = port.Economy.EffectivePrice(good);
+            var priceFact = new KnowledgeFact
+            {
+                Claim = new PortPriceClaim(port.Id, good, price),
+                Sensitivity = KnowledgeSensitivity.Public,
+                Confidence = ObservationConfidence,
+                BaseConfidence = ObservationConfidence,
+                ObservedDate = state.Date,
+                HopCount = 0,
+                SourceHolder = null,
+            };
+            RecordOutcomeForSuperseded(state.Knowledge, player, priceFact);
+            AddAndSupersede(state.Knowledge, player, priceFact, tick);
+        }
+    }
+
+    /// <summary>
+    /// Before superseding player facts with a new observation, check if the player's
+    /// existing belief about the same subject was accurate. Records the outcome against
+    /// that belief's SourceHolder for reputation tracking.
+    /// </summary>
+    private static void RecordOutcomeForSuperseded(KnowledgeStore store, KnowledgeHolderId holder,
+        KnowledgeFact incoming)
+    {
+        var subjectKey = KnowledgeFact.GetSubjectKey(incoming.Claim);
+        var existing = store.GetFacts(holder)
+            .FirstOrDefault(f => !f.IsSuperseded && KnowledgeFact.GetSubjectKey(f.Claim) == subjectKey);
+        if (existing?.SourceHolder is null) return;
+
+        var wasAccurate = existing.Claim == incoming.Claim;
+        store.RecordSourceOutcome(existing.SourceHolder, wasAccurate);
     }
 
     // ---- Confidence decay ----
@@ -202,7 +306,7 @@ public sealed class KnowledgeSystem : IWorldSystem
     private static void DegradeConfidence(WorldState state)
     {
         foreach (var fact in state.Knowledge.GetAllFacts())
-            fact.Confidence = Math.Max(0f, fact.Confidence - ConfidenceDecayPerTick);
+            fact.Confidence = Math.Max(0f, fact.Confidence * DecayFactor);
     }
 
     private static float LodToConfidence(SimulationLod lod) => lod switch

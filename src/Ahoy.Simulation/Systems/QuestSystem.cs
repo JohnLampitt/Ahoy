@@ -40,7 +40,7 @@ public sealed class QuestSystem : IWorldSystem
                 events.Emit(new QuestResolved(
                     state.Date, SimulationLod.Local,
                     instance.Template.Id.Value, instance.Id.ToString(),
-                    instance.Template.Title, QuestStatus.Expired, null),
+                    instance.Title, QuestStatus.Expired, null),
                     SimulationLod.Local);
             }
         }
@@ -55,17 +55,19 @@ public sealed class QuestSystem : IWorldSystem
                 continue;
 
             var triggerFacts = template.TriggerFactSelector(playerFacts);
+            var title = template.TitleFactory?.Invoke(triggerFacts) ?? template.Title;
             var instance = new QuestInstance
             {
                 Template      = template,
                 ActivatedDate = state.Date,
                 TriggerFacts  = triggerFacts,
+                Title         = title,
             };
             state.Quests.AddActive(instance);
             events.Emit(new QuestActivated(
                 state.Date, SimulationLod.Local,
                 template.Id.Value, instance.Id.ToString(),
-                template.Title),
+                title),
                 SimulationLod.Local);
         }
     }

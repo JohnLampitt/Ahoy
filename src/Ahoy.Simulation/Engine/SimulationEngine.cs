@@ -196,21 +196,68 @@ public sealed class SimulationEngine
                 var quest = _state.Quests.ActiveQuests
                     .FirstOrDefault(q => q.Id == qb.QuestInstanceId);
                 if (quest is null) break;
+                var playerFacts = _state.Knowledge.GetFacts(new State.PlayerHolder())
+                    .Where(f => !f.IsSuperseded).ToList();
                 var branch = quest.Template.Branches
-                    .FirstOrDefault(b => b.BranchId == qb.BranchId);
+                    .FirstOrDefault(b => b.BranchId == qb.BranchId
+                        && (b.AvailabilityCondition is null || b.AvailabilityCondition(playerFacts)));
                 if (branch is null) break;
                 quest.ChosenBranch = branch;
                 quest.Status       = QuestStatus.Completed;
                 quest.ResolvedDate = _state.Date;
                 foreach (var ev in branch.OutcomeEvents(_state))
                     _emitter.Emit(ev, ev.SourceLod);
+                ApplyOutcomeActions(branch.OutcomeActions, quest, _state, _tickNumber);
                 _emitter.Emit(new QuestResolved(
                     _state.Date, Core.Enums.SimulationLod.Local,
                     quest.Template.Id.Value, quest.Id.ToString(),
-                    quest.Template.Title, QuestStatus.Completed, branch.BranchId),
+                    quest.Title, QuestStatus.Completed, branch.BranchId),
                     Core.Enums.SimulationLod.Local);
                 _state.Quests.Resolve(quest);
                 break;
+        }
+    }
+
+    private void ApplyOutcomeActions(
+        IReadOnlyList<Quests.QuestOutcomeAction> actions,
+        Quests.QuestInstance quest,
+        WorldState state,
+        int tickNumber)
+    {
+        foreach (var action in actions)
+        {
+            switch (action)
+            {
+                case Quests.SupersedeTriggerFacts:
+                    foreach (var fact in quest.TriggerFacts)
+                        state.Knowledge.MarkSuperseded(new State.PlayerHolder(), fact, tickNumber);
+                    break;
+
+                case Quests.AddKnowledgeFact af:
+                    var newFact = new State.KnowledgeFact
+                    {
+                        Claim = af.Claim,
+                        Sensitivity = af.Sensitivity,
+                        Confidence = af.Confidence,
+                        BaseConfidence = af.Confidence,
+                        ObservedDate = state.Date,
+                    };
+                    foreach (var holder in af.Holders)
+                    {
+                        state.Knowledge.MarkSuperseded(holder, newFact, tickNumber);
+                        state.Knowledge.AddFact(holder, newFact);
+                    }
+                    break;
+
+                case Quests.EmitRumourAction er:
+                    var portId = er.PortSelector(state);
+                    if (portId.HasValue)
+                        _emitter.Emit(
+                            new Events.RumourSpread(state.Date, Core.Enums.SimulationLod.Regional,
+                                portId.Value, er.Text),
+                            Core.Enums.SimulationLod.Regional);
+                    break;
+            }
         }
     }
 

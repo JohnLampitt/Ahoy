@@ -316,10 +316,14 @@ public sealed class SimulationHarness
 
         System.Console.WriteLine($"  Active quests: {active.Count}");
 
+        var playerFacts = _engine.State.Knowledge.GetFacts(
+            new Ahoy.Simulation.State.PlayerHolder())
+            .Where(f => !f.IsSuperseded).ToList();
+
         foreach (var (q, i) in active.Select((q, i) => (q, i + 1)))
         {
             System.Console.WriteLine();
-            System.Console.WriteLine($"  [{i}] {q.Template.Title}  ({q.Id})");
+            System.Console.WriteLine($"  [{i}] {q.Title}  ({q.Id})");
             System.Console.WriteLine($"     {q.DisplayDialogue}");
             System.Console.WriteLine($"     NPC: {q.DisplayNpcName}   Activated: {q.ActivatedDate}");
 
@@ -336,7 +340,11 @@ public sealed class SimulationHarness
 
             System.Console.WriteLine("     Branches:");
             foreach (var b in q.Template.Branches)
+            {
+                if (b.AvailabilityCondition is not null && !b.AvailabilityCondition(playerFacts))
+                    continue;
                 System.Console.WriteLine($"       choose {q.Id} {b.BranchId,-18}  {b.Label}");
+            }
         }
     }
 
@@ -384,6 +392,25 @@ public sealed class SimulationHarness
             var corr = fact.CorroborationCount > 0 ? $"  corr:{fact.CorroborationCount}" : "";
             var src = FormatSourceHolder(fact.SourceHolder);
             System.Console.WriteLine($"  {conf,7}  {claim,-22}  {age}  hops:{fact.HopCount}{corr}  src:{src}");
+        }
+
+        var player = new Ahoy.Simulation.State.PlayerHolder();
+        var conflicts = s.Knowledge.GetConflicts(player).ToList();
+        if (conflicts.Count > 0)
+        {
+            System.Console.WriteLine();
+            System.Console.WriteLine($"  Conflicts: {conflicts.Count}");
+            foreach (var conflict in conflicts)
+            {
+                var spread = $"{conflict.ConfidenceSpread:P0}";
+                System.Console.WriteLine($"  [CONFLICT] {conflict.SubjectKey} — {conflict.CompetingFacts.Count} competing claims (spread: {spread})");
+                foreach (var cf in conflict.CompetingFacts.OrderByDescending(f => f.Confidence))
+                {
+                    var marker = cf == conflict.DominantFact ? "dominant" : "competing";
+                    var src = FormatSourceHolder(cf.SourceHolder);
+                    System.Console.WriteLine($"    [{cf.Confidence:P0}] {cf.Claim.GetType().Name.Replace("Claim", "")}  hops:{cf.HopCount}  src:{src}  ({marker})");
+                }
+            }
         }
     }
 

@@ -103,11 +103,47 @@ public sealed class KnowledgeFact
     };
 }
 
+// ---- KnowledgeConflict ----
+
+/// <summary>
+/// A first-class record of two or more contradicting facts held by the same actor
+/// about the same subject. Created when <see cref="KnowledgeStore.AddFact"/> detects
+/// that a new fact's claim differs from an existing non-superseded fact with the same
+/// subject key. Conflicts are resolved when one side is superseded (by an authoritative
+/// direct observation or by natural confidence decay below the pruning floor).
+/// </summary>
+public sealed record KnowledgeConflict
+{
+    public required string SubjectKey { get; init; }
+    /// <summary>All competing non-superseded facts for this subject key.</summary>
+    public required IReadOnlyList<KnowledgeFact> CompetingFacts { get; init; }
+
+    /// <summary>The fact with the highest current confidence — the "winning" belief.</summary>
+    public KnowledgeFact? DominantFact =>
+        CompetingFacts.OrderByDescending(f => f.Confidence).FirstOrDefault();
+
+    /// <summary>Confidence difference between highest and lowest competing fact.</summary>
+    public float ConfidenceSpread =>
+        CompetingFacts.Count < 2 ? 0f
+        : CompetingFacts.Max(f => f.Confidence) - CompetingFacts.Min(f => f.Confidence);
+
+    /// <summary>True when only one (or zero) active facts remain for this subject.</summary>
+    public bool IsResolved => CompetingFacts.Count(f => !f.IsSuperseded) <= 1;
+}
+
 // ---- KnowledgeStore ----
 
 public sealed class KnowledgeStore
 {
     private readonly Dictionary<KnowledgeHolderId, List<KnowledgeFact>> _store = new();
+
+    // Per-holder conflict index. Key: (holder, subjectKey).
+    // Updated in AddFact whenever a contradiction is detected.
+    private readonly Dictionary<(KnowledgeHolderId, string), KnowledgeConflict> _conflicts = new();
+
+    // Source reliability weights. Default 1.0; modified by RecordSourceOutcome.
+    // Applied as a multiplier to incoming confidence during propagation.
+    private readonly Dictionary<KnowledgeHolderId, float> _sourceReliability = new();
 
     public void AddFact(KnowledgeHolderId holder, KnowledgeFact fact)
     {
@@ -117,6 +153,10 @@ public sealed class KnowledgeStore
             _store[holder] = list;
         }
         list.Add(fact);
+
+        // Update conflict index for this (holder, subject)
+        var subjectKey = KnowledgeFact.GetSubjectKey(fact.Claim);
+        UpdateConflicts(holder, subjectKey);
     }
 
     public IReadOnlyList<KnowledgeFact> GetFacts(KnowledgeHolderId holder)
@@ -124,6 +164,30 @@ public sealed class KnowledgeStore
 
     public IReadOnlyList<KnowledgeFact> GetAllFacts()
         => _store.Values.SelectMany(x => x).ToList();
+
+    /// <summary>All active KnowledgeConflicts held by the specified actor.</summary>
+    public IEnumerable<KnowledgeConflict> GetConflicts(KnowledgeHolderId holder) =>
+        _conflicts
+            .Where(kv => kv.Key.Item1.Equals(holder))
+            .Select(kv => kv.Value);
+
+    /// <summary>
+    /// Reliability weight for a given source. Default 1.0.
+    /// Null source (direct witness) always returns 1.0.
+    /// </summary>
+    public float GetSourceReliability(KnowledgeHolderId? source) =>
+        source is null ? 1.0f
+        : _sourceReliability.GetValueOrDefault(source, 1.0f);
+
+    /// <summary>
+    /// Record whether a source proved accurate when their claim was checked by direct
+    /// observation. Accurate sources gain +0.05; inaccurate lose -0.15. Clamped 0.1..1.5.
+    /// </summary>
+    public void RecordSourceOutcome(KnowledgeHolderId source, bool wasAccurate)
+    {
+        var current = _sourceReliability.GetValueOrDefault(source, 1.0f);
+        _sourceReliability[source] = Math.Clamp(current + (wasAccurate ? 0.05f : -0.15f), 0.1f, 1.5f);
+    }
 
     /// <summary>
     /// Marks all existing facts for this holder that share the same subject key
@@ -148,13 +212,26 @@ public sealed class KnowledgeStore
     /// <summary>
     /// Remove facts with confidence below threshold, or superseded facts from a previous tick.
     /// Superseded facts are kept for one full tick so other systems can read prior beliefs.
+    /// After pruning, re-evaluates conflicts for any affected subjects.
     /// </summary>
     public void PruneExpired(int currentTick, float minimumConfidence = 0.05f)
     {
-        foreach (var list in _store.Values)
+        foreach (var (holder, list) in _store)
+        {
+            var keysAffected = list
+                .Where(f => f.Confidence < minimumConfidence ||
+                            (f.IsSuperseded && f.SupersededOnTick < currentTick))
+                .Select(f => KnowledgeFact.GetSubjectKey(f.Claim))
+                .Distinct()
+                .ToList();
+
             list.RemoveAll(f =>
                 f.Confidence < minimumConfidence ||
                 (f.IsSuperseded && f.SupersededOnTick < currentTick));
+
+            foreach (var subjectKey in keysAffected)
+                UpdateConflicts(holder, subjectKey);
+        }
     }
 
     /// <summary>
@@ -163,4 +240,24 @@ public sealed class KnowledgeStore
     /// </summary>
     public bool IsAnchored(KnowledgeHolderId holder, float confidenceThreshold = 0.7f)
         => GetFacts(holder).Any(f => f.Confidence >= confidenceThreshold);
+
+    // ---- Conflict maintenance ----
+
+    private void UpdateConflicts(KnowledgeHolderId holder, string subjectKey)
+    {
+        if (!_store.TryGetValue(holder, out var list)) return;
+
+        var active = list
+            .Where(f => !f.IsSuperseded && KnowledgeFact.GetSubjectKey(f.Claim) == subjectKey)
+            .ToList();
+
+        var hasContradiction = active.Count > 1
+            && active.Select(f => f.Claim).Distinct().Count() > 1;
+
+        var key = (holder, subjectKey);
+        if (hasContradiction)
+            _conflicts[key] = new KnowledgeConflict { SubjectKey = subjectKey, CompetingFacts = active };
+        else
+            _conflicts.Remove(key);
+    }
 }

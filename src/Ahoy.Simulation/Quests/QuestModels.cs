@@ -1,3 +1,4 @@
+using Ahoy.Core.Enums;
 using Ahoy.Core.Ids;
 using Ahoy.Core.ValueObjects;
 using Ahoy.Simulation.Events;
@@ -33,6 +34,29 @@ public record AndCondition(IReadOnlyList<QuestCondition> Children) : QuestCondit
 /// <summary>At least one child condition must be satisfied.</summary>
 public record OrCondition(IReadOnlyList<QuestCondition> Children) : QuestCondition;
 
+// ---- Outcome actions ----
+
+/// <summary>
+/// A declarative action executed when the player chooses a quest branch.
+/// Processed by SimulationEngine after OutcomeEvents are emitted.
+/// </summary>
+public abstract record QuestOutcomeAction;
+
+/// <summary>Mark all facts that triggered this quest as superseded.</summary>
+public record SupersedeTriggerFacts() : QuestOutcomeAction;
+
+/// <summary>Add a new knowledge fact to the specified holders.</summary>
+public record AddKnowledgeFact(
+    KnowledgeClaim Claim,
+    float Confidence,
+    KnowledgeSensitivity Sensitivity,
+    KnowledgeHolderId[] Holders) : QuestOutcomeAction;
+
+/// <summary>Emit a RumourSpread event at a port determined by the selector.</summary>
+public record EmitRumourAction(
+    string Text,
+    Func<WorldState, PortId?> PortSelector) : QuestOutcomeAction;
+
 // ---- Branch ----
 
 public sealed class QuestBranch
@@ -46,6 +70,18 @@ public sealed class QuestBranch
     /// Evaluated at resolution time so they can capture current WorldState.
     /// </summary>
     public required Func<WorldState, IReadOnlyList<WorldEvent>> OutcomeEvents { get; init; }
+
+    /// <summary>
+    /// Declarative world-state mutations applied after OutcomeEvents.
+    /// Runs against KnowledgeStore to supersede facts, add new facts, emit rumours, etc.
+    /// </summary>
+    public IReadOnlyList<QuestOutcomeAction> OutcomeActions { get; init; } = [];
+
+    /// <summary>
+    /// If non-null, this branch is hidden when the condition evaluates to false against
+    /// the player's current knowledge. Evaluated at display time and at choose-time.
+    /// </summary>
+    public Func<IReadOnlyList<KnowledgeFact>, bool>? AvailabilityCondition { get; init; }
 
     /// <summary>If non-null, this template is triggered after this branch resolves.</summary>
     public QuestTemplateId? NextQuestTemplateId { get; init; }
@@ -70,6 +106,14 @@ public sealed class QuestTemplate
     /// <summary>Returns true if the quest should expire given current instance state and world.</summary>
     public required Func<QuestInstance, WorldState, bool> ExpiryPredicate { get; init; }
 
+    /// <summary>
+    /// Optional factory that derives a display title from the triggering facts.
+    /// Falls back to <see cref="Title"/> when null.
+    /// Use this for variety: "A galleon matching <em>San Cristóbal</em> was spotted…"
+    /// rather than a hardcoded generic line.
+    /// </summary>
+    public Func<IReadOnlyList<KnowledgeFact>, string>? TitleFactory { get; init; }
+
     // ---- Flavour / metadata ----
     public string? NpcName { get; init; }
     public string? DefaultNpcDialogue { get; init; }
@@ -90,6 +134,12 @@ public sealed class QuestInstance
     public QuestStatus Status { get; set; } = QuestStatus.Active;
     public required WorldDate ActivatedDate { get; init; }
     public required IReadOnlyList<KnowledgeFact> TriggerFacts { get; init; }
+
+    /// <summary>
+    /// Display title for this specific instance.
+    /// Set at activation from TitleFactory(triggerFacts) if defined, otherwise Template.Title.
+    /// </summary>
+    public required string Title { get; init; }
 
     // ---- LLM-filled flavour (null until wired) ----
     public string? LlmNpcName { get; set; }
