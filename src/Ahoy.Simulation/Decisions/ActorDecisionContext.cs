@@ -24,6 +24,13 @@ public sealed class ActorDecisionContext
 
     /// <summary>The actor's current relationship with the player (-100..+100).</summary>
     public float PlayerRelationship { get; init; }
+
+    /// <summary>
+    /// The port's structural reputation with the player (-100..+100).
+    /// Represents the populace's view — persists across governor changes.
+    /// Blended with PlayerRelationship by the decision provider for effective affinity.
+    /// </summary>
+    public float PortPersonalReputation { get; init; }
 }
 
 /// <summary>
