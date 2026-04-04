@@ -178,7 +178,16 @@ public sealed class SimulationHarness
                 PortProsperityChanged pc   => $"{FormatProsperityChange(pc.OldValue, pc.NewValue)} {PortName(pc.PortId)} prosperity {pc.OldValue:F0}→{pc.NewValue:F0}",
                 FactionRelationshipChanged frc => $"🤝 {FactionName(frc.FactionA)} ↔ {FactionName(frc.FactionB)} relationship changed",
                 PortCaptured cap           => $"⚔  {PortName(cap.PortId)} captured by {FactionName(cap.NewFaction)}!",
-                ShipDestroyed sdes         => $"💥 {ShipName(sdes.ShipId)} destroyed",
+                ShipDestroyed sdes         => $"💥 {ShipName(sdes.ShipId)} destroyed"
+                    + (sdes.AttackerId.HasValue ? $" (by {ShipName(sdes.AttackerId.Value)})" : " (lost at sea)"),
+                IndividualDied id          => $"✝  {IndividualName(id.IndividualId)} has died ({id.Cause})",
+                GovernorChanged gc         => gc.NewGovernor.HasValue
+                    ? $"🏛  {PortName(gc.PortId)}: new governor {IndividualName(gc.NewGovernor.Value)}"
+                    : $"🏛  {PortName(gc.PortId)}: governor vacancy",
+                RumourSpread rs            => $"💬 Rumour at {PortName(rs.PortId)}: {rs.Rumour}",
+                BribeAccepted ba           => $"🤑 Bribe accepted by {IndividualName(ba.GovernorId)} at {PortName(ba.PortId)} ({ba.GoldAmount}g)",
+                BribeRejected br           => $"😤 Bribe rejected by {IndividualName(br.GovernorId)} at {PortName(br.PortId)}",
+                AgentBurned ab             => $"🔥 Agent burned: {IndividualName(ab.AgentId)}",
                 QuestActivated qa          => $"📜 Quest available: {qa.Title}",
                 QuestResolved qr           => qr.Status == Ahoy.Simulation.Quests.QuestStatus.Completed
                     ? $"📜 Quest resolved ({qr.ChosenBranchId}): {qr.Title}"
@@ -199,6 +208,9 @@ public sealed class SimulationHarness
 
     private string ShipName(Ahoy.Core.Ids.ShipId id) =>
         _engine.State.Ships.TryGetValue(id, out var s) ? s.Name : id.ToString();
+
+    private string IndividualName(Ahoy.Core.Ids.IndividualId id) =>
+        _engine.State.Individuals.TryGetValue(id, out var ind) ? ind.FullName : id.ToString();
 
     private string FactionName(Ahoy.Core.Ids.FactionId id) =>
         _engine.State.Factions.TryGetValue(id, out var f) ? f.Name : id.ToString();

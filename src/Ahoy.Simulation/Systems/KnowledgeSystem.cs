@@ -172,6 +172,50 @@ public sealed class KnowledgeSystem : IWorldSystem
                 AddAndSupersede(state.Knowledge, new PortHolder(im.FromPort), movedFact, tick);
                 AddAndSupersede(state.Knowledge, new PortHolder(im.ToPort),   movedFact, tick);
                 break;
+
+            case IndividualDied ev:
+                // Death notice — seeded into the port where the individual died.
+                // Shares the "Individual:{id}" subject key with IndividualWhereaboutsClaim
+                // so it automatically supersedes any live location claim for the same person.
+                if (!state.Individuals.TryGetValue(ev.IndividualId, out var deceased)) break;
+                var deathFact = new KnowledgeFact
+                {
+                    Claim          = new IndividualStatusClaim(ev.IndividualId, deceased.Role, deceased.FactionId, IsAlive: false),
+                    Sensitivity    = KnowledgeSensitivity.Restricted,
+                    Confidence     = 0.80f,
+                    BaseConfidence = 0.80f,
+                    ObservedDate   = ev.Date,
+                    HopCount       = 0,
+                    SourceHolder   = null,
+                };
+                if (deceased.LocationPortId.HasValue)
+                    AddAndSupersede(state.Knowledge, new PortHolder(deceased.LocationPortId.Value), deathFact, tick);
+                if (worldEvent.SourceLod == SimulationLod.Local)
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), deathFact, tick);
+                break;
+
+            case ShipDestroyed sd:
+                // Ship destroyed in combat: knowledge goes into the attacker's ShipHolder.
+                // It propagates to ports only when the attacker docks — realistic lag.
+                // Weather destruction has no witnesses; the ship's location claim decays naturally.
+                if (sd.AttackerId is not { } attackerShipId) break;
+                var regionOfDestruction = sd.SourceLod == SimulationLod.Local && context.PlayerRegion.HasValue
+                    ? context.PlayerRegion
+                    : null;
+                var sinkFact = new KnowledgeFact
+                {
+                    Claim          = new ShipStatusClaim(sd.ShipId, IsDestroyed: true, regionOfDestruction),
+                    Sensitivity    = KnowledgeSensitivity.Public,
+                    Confidence     = 0.75f,
+                    BaseConfidence = 0.75f,
+                    ObservedDate   = sd.Date,
+                    HopCount       = 0,
+                    SourceHolder   = null,
+                };
+                AddAndSupersede(state.Knowledge, new ShipHolder(attackerShipId), sinkFact, tick);
+                if (sd.SourceLod == SimulationLod.Local)
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), sinkFact, tick);
+                break;
         }
     }
 

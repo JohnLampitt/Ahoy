@@ -25,6 +25,8 @@ public record FactionIntentionClaim(FactionId Faction, string IntentionSummary) 
 public record WeatherClaim(RegionId Region, WindStrength Wind, StormPresence Storm) : KnowledgeClaim;
 public record RouteHazardClaim(RegionId From, RegionId To, string Description) : KnowledgeClaim;
 public record IndividualWhereaboutsClaim(IndividualId Individual, PortId? Port) : KnowledgeClaim;
+public record IndividualStatusClaim(IndividualId Individual, IndividualRole Role, FactionId? FactionId, bool IsAlive) : KnowledgeClaim;
+public record ShipStatusClaim(ShipId Ship, bool IsDestroyed, RegionId? LastKnownRegion) : KnowledgeClaim;
 public record PlayerActionClaim(string QuestTemplateId, string BranchId, PortId? Location) : KnowledgeClaim;
 public record CustomClaim(string Subject, string Detail) : KnowledgeClaim;
 
@@ -116,13 +118,17 @@ public sealed class KnowledgeFact
         PortPriceClaim c           => $"PortPrice:{c.Port.Value}:{c.Good}",
         PortProsperityClaim c      => $"PortProsperity:{c.Port.Value}",
         PortControlClaim c         => $"PortControl:{c.Port.Value}",
-        ShipLocationClaim c        => $"ShipLocation:{c.Ship.Value}",
+        // Ship: unified prefix so ShipStatusClaim(destroyed) supersedes ShipLocationClaim(at-sea)
+        ShipLocationClaim c        => $"Ship:{c.Ship.Value}",
+        ShipStatusClaim c          => $"Ship:{c.Ship.Value}",
         ShipCargoClaim c           => $"ShipCargo:{c.Ship.Value}",
         FactionStrengthClaim c     => $"FactionStrength:{c.Faction.Value}",
         FactionIntentionClaim c    => $"FactionIntention:{c.Faction.Value}",
         WeatherClaim c             => $"Weather:{c.Region.Value}",
         RouteHazardClaim c         => $"RouteHazard:{c.From.Value}:{c.To.Value}",
-        IndividualWhereaboutsClaim c => $"IndividualWhereabouts:{c.Individual.Value}",
+        // Individual: unified prefix so IndividualStatusClaim(dead) supersedes IndividualWhereaboutsClaim(at port)
+        IndividualWhereaboutsClaim c  => $"Individual:{c.Individual.Value}",
+        IndividualStatusClaim c       => $"Individual:{c.Individual.Value}",
         // Each distinct quest resolution is its own subject — two A1 completions on different ships don't supersede each other.
         PlayerActionClaim c        => $"PlayerAction:{c.QuestTemplateId}:{c.BranchId}",
         CustomClaim c              => $"Custom:{c.Subject}",
