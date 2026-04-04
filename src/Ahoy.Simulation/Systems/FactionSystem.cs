@@ -58,6 +58,9 @@ public sealed class FactionSystem : IWorldSystem
             TickRelationshipDecay(faction);
             TickIntelligence(faction);
             EmitStrengthFactIfChanged(faction, factionId, state, context);
+
+            if (faction.Type == FactionType.Colonial)
+                SeedContracts(faction, factionId, state, context);
         }
 
         TickBurnReplacements(state, context, events);
@@ -353,6 +356,127 @@ public sealed class FactionSystem : IWorldSystem
         // Seed into the haven's knowledge pool; it will propagate naturally from there
         state.Knowledge.MarkSuperseded(new PortHolder(targetPort.Id), falseFact, context.TickNumber);
         state.Knowledge.AddFact(new PortHolder(targetPort.Id), falseFact);
+    }
+
+    // ---- Contract seeding ----
+
+    private void SeedContracts(Faction faction, FactionId factionId, WorldState state,
+        SimulationContext context)
+    {
+        // Find the governor for this faction
+        var governor = state.Individuals.Values.FirstOrDefault(ind =>
+            ind.IsAlive
+            && ind.Role == IndividualRole.Governor
+            && ind.FactionId == factionId
+            && ind.HomePortId.HasValue
+            && faction.ControlledPorts.Contains(ind.HomePortId.Value));
+
+        if (governor is null) return;
+
+        // 1. SuppressPiracy goals → pirate ship bounties
+        foreach (var goal in faction.ActiveGoals.OfType<SuppressPiracy>())
+        {
+            var targetRegionId = goal.TargetRegion;
+
+            // Find pirate ships at sea in the target region
+            var pirateShips = state.Ships.Values
+                .Where(s => s.IsPirate
+                    && s.Location is AtSea ats && ats.Region == targetRegionId)
+                .ToList();
+
+            foreach (var pirateShip in pirateShips)
+            {
+                var shipSubjectKey = $"Ship:{pirateShip.Id.Value}";
+                var bounty = (int)(500 + faction.TreasuryGold * 0.02f);
+
+                // Rate-limit: check all port knowledge stores in controlled ports for existing contract
+                var alreadyContracted = faction.ControlledPorts.Any(portId =>
+                    state.Knowledge.GetFacts(new PortHolder(portId))
+                        .Any(f => !f.IsSuperseded
+                            && f.Claim is ContractClaim cc
+                            && cc.TargetSubjectKey == shipSubjectKey));
+
+                if (alreadyContracted) continue;
+
+                // Seed into ports in target region and adjacent regions
+                var seedPorts = GetSeedPorts(faction, targetRegionId, state);
+                SeedContractInPorts(seedPorts, governor.Id, factionId, shipSubjectKey,
+                    ContractConditionType.TargetDestroyed, bounty,
+                    NarrativeArchetype.ColonialCommission, state, context.TickNumber);
+            }
+        }
+
+        // 2. Famine ports → GoodsDelivered contracts
+        foreach (var portId in faction.ControlledPorts.ToList())
+        {
+            if (!state.Ports.TryGetValue(portId, out var port)) continue;
+            if (!port.Conditions.HasFlag(PortConditionFlags.Famine)) continue;
+
+            var deliverySubjectKey = $"Port:{portId.Value}:Food";
+            var foodReward = (int)(800 + faction.TreasuryGold * 0.03f);
+
+            // Rate-limit
+            var alreadyContracted = faction.ControlledPorts.Any(pid =>
+                state.Knowledge.GetFacts(new PortHolder(pid))
+                    .Any(f => !f.IsSuperseded
+                        && f.Claim is ContractClaim cc
+                        && cc.TargetSubjectKey == deliverySubjectKey));
+
+            if (alreadyContracted) continue;
+
+            // Seed into nearby ports (all controlled ports)
+            var seedPorts = faction.ControlledPorts.Where(pid => pid != portId).ToList();
+            SeedContractInPorts(seedPorts, governor.Id, factionId, deliverySubjectKey,
+                ContractConditionType.GoodsDelivered, foodReward,
+                NarrativeArchetype.DesperatePlea, state, context.TickNumber);
+        }
+    }
+
+    private static List<PortId> GetSeedPorts(Faction faction, RegionId targetRegionId,
+        WorldState state)
+    {
+        // Ports in target region + adjacent regions that are controlled by this faction
+        var adjacentRegions = state.Regions.TryGetValue(targetRegionId, out var reg)
+            ? reg.AdjacentRegions : [];
+
+        return faction.ControlledPorts
+            .Where(pid =>
+            {
+                if (!state.Ports.TryGetValue(pid, out var p)) return false;
+                return p.RegionId == targetRegionId || adjacentRegions.Contains(p.RegionId);
+            })
+            .ToList();
+    }
+
+    private static void SeedContractInPorts(
+        List<PortId> seedPorts,
+        IndividualId issuerId,
+        FactionId issuerFactionId,
+        string targetSubjectKey,
+        ContractConditionType condition,
+        int goldReward,
+        NarrativeArchetype archetype,
+        WorldState state,
+        int tickNumber)
+    {
+        var claim = new ContractClaim(
+            issuerId, issuerFactionId, targetSubjectKey,
+            condition, goldReward, archetype);
+
+        foreach (var portId in seedPorts)
+        {
+            var fact = new KnowledgeFact
+            {
+                Claim          = claim,
+                Sensitivity    = KnowledgeSensitivity.Restricted,
+                Confidence     = 0.80f,
+                BaseConfidence = 0.80f,
+                ObservedDate   = state.Date,
+                HopCount       = 0,
+                SourceHolder   = new FactionHolder(issuerFactionId),
+            };
+            state.Knowledge.AddFact(new PortHolder(portId), fact);
+        }
     }
 
     private static void TickIntelligence(Faction faction)

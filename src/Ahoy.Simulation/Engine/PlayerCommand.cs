@@ -1,4 +1,6 @@
 using Ahoy.Core.Ids;
+using Ahoy.Simulation.Quests;
+using Ahoy.Simulation.State;
 
 namespace Ahoy.Simulation.Engine;
 
@@ -43,9 +45,13 @@ public record BurnAgentCommand(IndividualId AgentId) : PlayerCommand;
 
 // ---- Quests ----
 
-public record ChooseQuestBranchCommand(
-    Quests.QuestInstanceId QuestInstanceId,
-    string BranchId) : PlayerCommand;
+public record FabricateFactCommand(
+    IndividualId FakeIssuerId,
+    string TargetSubjectKey,
+    ContractConditionType Condition,
+    int ClaimedReward) : PlayerCommand;
+
+public record ClaimContractRewardCommand(QuestInstanceId QuestInstanceId) : PlayerCommand;
 
 // ---- Actor decisions ----
 

@@ -55,7 +55,6 @@ public sealed class SimulationEngine
         WorldState state,
         IPlayerCommandQueue? commandQueue = null,
         IAsyncActorDecisionProvider? llmProvider = null,
-        IReadOnlyList<QuestTemplate>? questTemplates = null,
         Random? rng = null)
     {
         rng ??= new Random();
@@ -67,14 +66,14 @@ public sealed class SimulationEngine
 
         var systems = new List<IWorldSystem>
         {
-            new WeatherSystem(rng),                                          // Step 1
-            new ShipMovementSystem(rng),                                     // Step 2
-            new EconomySystem(rng),                                          // Step 3
-            new FactionSystem(rng),                                          // Step 4
-            new IndividualLifecycleSystem(rng),                              // Step 5
-            new EventPropagationSystem(emitter),                             // Step 6
-            new KnowledgeSystem(emitter, rng),                               // Step 7
-            new QuestSystem(questTemplates ?? Array.Empty<QuestTemplate>()), // Step 8
+            new WeatherSystem(rng),              // Step 1
+            new ShipMovementSystem(rng),         // Step 2
+            new EconomySystem(rng),              // Step 3
+            new FactionSystem(rng),              // Step 4
+            new IndividualLifecycleSystem(rng),  // Step 5
+            new EventPropagationSystem(emitter), // Step 6
+            new KnowledgeSystem(emitter, rng),   // Step 7
+            new QuestSystem(),                   // Step 8
         };
 
         return new SimulationEngine(state, commandQueue, emitter, systems, decisionQueue, rng);
@@ -226,79 +225,150 @@ public sealed class SimulationEngine
                 break;
             }
 
-            case ChooseQuestBranchCommand qb:
-                var quest = _state.Quests.ActiveQuests
-                    .FirstOrDefault(q => q.Id == qb.QuestInstanceId);
-                if (quest is null) break;
-                var playerFacts = _state.Knowledge.GetFacts(new State.PlayerHolder())
-                    .Where(f => !f.IsSuperseded).ToList();
-                var branch = quest.Template.Branches
-                    .FirstOrDefault(b => b.BranchId == qb.BranchId
-                        && (b.AvailabilityCondition is null || b.AvailabilityCondition(playerFacts)));
-                if (branch is null) break;
+            case FabricateFactCommand fab:
+            {
+                // Create a disinformation ContractClaim and inject it into the player's knowledge
+                var fakeClaim = new State.ContractClaim(
+                    fab.FakeIssuerId,
+                    // We don't know the faction here — use a placeholder (empty faction id won't exist)
+                    // The player is fabricating a contract; we need a FactionId. Use a stub via a zero GUID.
+                    new Core.Ids.FactionId(Guid.Empty),
+                    fab.TargetSubjectKey,
+                    fab.Condition,
+                    fab.ClaimedReward);
 
-                // Disinformation check: if trigger facts were planted, the player acted on false intel.
-                // Inject correcting observations so the epistemic state self-heals without flag leakage.
-                var disinfoFacts = quest.TriggerFacts.Where(f => f.IsDisinformation).ToList();
-                var resolvedStatus = disinfoFacts.Count > 0 ? QuestStatus.Failed : QuestStatus.Completed;
-                foreach (var df in disinfoFacts)
-                    InjectDisinformationCorrection(df, _state, _tickNumber);
-
-                quest.ChosenBranch = branch;
-                quest.Status       = resolvedStatus;
-                quest.ResolvedDate = _state.Date;
-                foreach (var ev in branch.OutcomeEvents(_state))
-                    _emitter.Emit(ev, ev.SourceLod);
-                ApplyOutcomeActions(branch.OutcomeActions, quest, _state, _tickNumber);
-
-                // Auto-emit PlayerActionClaim — world-observable record of the player's choice.
-                // Faction systems read FactionHolder's knowledge pool to update standings;
-                // they do NOT get magic direct notification.
-                var playerPortForAction = (_state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip)?.Location
-                    as State.AtPort)?.Port;
-                // PlayerHolder copy is decay-exempt: the player's own ledger of their actions
-                // is a record of agency, not an epistemic guess that should fade.
-                var playerCopyFact = new State.KnowledgeFact
+                var fabricatedFact = new State.KnowledgeFact
                 {
-                    Claim          = new State.PlayerActionClaim(quest.Template.Id.Value, branch.BranchId, playerPortForAction),
+                    Claim          = fakeClaim,
                     Sensitivity    = Core.Enums.KnowledgeSensitivity.Restricted,
-                    Confidence     = 1.0f,
-                    BaseConfidence = 1.0f,
+                    Confidence     = 0.85f,
+                    BaseConfidence = 0.85f,
                     ObservedDate   = _state.Date,
                     HopCount       = 0,
                     SourceHolder   = null,
-                    IsDecayExempt  = true,
+                    IsDisinformation = true,
                 };
-                _state.Knowledge.AddFact(new State.PlayerHolder(), playerCopyFact);
-                // Port copy decays normally — witnesses forget, but the player never does.
-                if (playerPortForAction.HasValue)
+                _state.Knowledge.MarkSuperseded(new State.PlayerHolder(), fabricatedFact, _tickNumber);
+                _state.Knowledge.AddFact(new State.PlayerHolder(), fabricatedFact);
+                break;
+            }
+
+            case ClaimContractRewardCommand claim:
+            {
+                var questInstance = _state.Quests.ActiveContractQuests
+                    .FirstOrDefault(q => q.Id == claim.QuestInstanceId);
+                if (questInstance is null) break;
+                if (questInstance.Status != Quests.ContractQuestStatus.Fulfilled) break;
+
+                var contract = questInstance.Contract;
+
+                // Guard: player ship at a port controlled by IssuerFactionId
+                var playerShip = _state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
+                if (playerShip?.Location is not State.AtPort claimAtPort) break;
+                if (!_state.Ports.TryGetValue(claimAtPort.Port, out var claimPort)) break;
+                if (claimPort.ControllingFactionId != contract.IssuerFactionId) break;
+
+                // Guard: issuer is alive
+                if (!_state.Individuals.TryGetValue(contract.IssuerId, out var issuer)) break;
+                if (!issuer.IsAlive) break;
+
+                // Fraud check: does the issuer's IndividualHolder have a status fact about target
+                // that predates the contract and already shows target as dead/destroyed?
+                var issuerHolder = new State.IndividualHolder(contract.IssuerId);
+                var contractFact = _state.Knowledge.GetFacts(new State.PlayerHolder())
+                    .FirstOrDefault(f => f.Id == questInstance.ContractFactId);
+
+                if (contractFact is not null)
                 {
-                    var portCopyFact = new State.KnowledgeFact
+                    var issuerStatusFact = _state.Knowledge.GetFacts(issuerHolder)
+                        .FirstOrDefault(f => !f.IsSuperseded
+                            && KnowledgeFact.GetSubjectKey(f.Claim) == contract.TargetSubjectKey);
+
+                    bool isFraud = false;
+                    if (issuerStatusFact is not null
+                        && issuerStatusFact.ObservedDate.CompareTo(contractFact.ObservedDate) < 0)
                     {
-                        Claim          = new State.PlayerActionClaim(quest.Template.Id.Value, branch.BranchId, playerPortForAction),
-                        Sensitivity    = Core.Enums.KnowledgeSensitivity.Restricted,
-                        Confidence     = 1.0f,
-                        BaseConfidence = 1.0f,
-                        ObservedDate   = _state.Date,
-                        HopCount       = 0,
-                        SourceHolder   = null,
-                    };
-                    _state.Knowledge.AddFact(new State.PortHolder(playerPortForAction.Value), portCopyFact);
+                        // Issuer knew target was already eliminated before the contract was issued
+                        if (issuerStatusFact.Claim is State.ShipStatusClaim ssc && ssc.IsDestroyed)
+                            isFraud = true;
+                        else if (issuerStatusFact.Claim is State.IndividualStatusClaim isc && !isc.IsAlive)
+                            isFraud = true;
+                    }
+
+                    if (isFraud)
+                    {
+                        // Fraud path: relationship penalty, emit counter-bounty
+                        issuer.PlayerRelationship = Math.Clamp(issuer.PlayerRelationship - 50f, -100f, 100f);
+
+                        // Seed counter-bounty ContractClaim into all faction ports
+                        if (_state.Factions.TryGetValue(contract.IssuerFactionId, out var issuerFaction))
+                        {
+                            var counterContract = new State.ContractClaim(
+                                contract.IssuerId,
+                                contract.IssuerFactionId,
+                                $"Individual:{_state.Player.CaptainName}",
+                                ContractConditionType.TargetDead,
+                                500,
+                                NarrativeArchetype.PoliticalBounty);
+
+                            foreach (var portId in issuerFaction.ControlledPorts)
+                            {
+                                var counterFact = new State.KnowledgeFact
+                                {
+                                    Claim          = counterContract,
+                                    Sensitivity    = Core.Enums.KnowledgeSensitivity.Restricted,
+                                    Confidence     = 0.90f,
+                                    BaseConfidence = 0.90f,
+                                    ObservedDate   = _state.Date,
+                                    HopCount       = 0,
+                                    SourceHolder   = new State.FactionHolder(contract.IssuerFactionId),
+                                };
+                                _state.Knowledge.AddFact(new State.PortHolder(portId), counterFact);
+                            }
+                        }
+                        break; // Fraud path — no payment
+                    }
                 }
 
-                // Cooldown: suppress re-triggering this quest/subject for 20 ticks
-                var actionSubjectKey = quest.TriggerFacts.Count > 0
-                    ? KnowledgeFact.GetSubjectKey(quest.TriggerFacts[0].Claim)
-                    : quest.Template.Id.Value;
-                _state.Quests.RecordCooldown(quest.Template.Id, actionSubjectKey, _state.Date.Advance(20));
+                // Legitimate path: pay reward
+                var reward = contract.GoldReward;
+                if (issuer.CurrentGold >= reward)
+                {
+                    issuer.CurrentGold -= reward;
+                }
+                else if (_state.Factions.TryGetValue(contract.IssuerFactionId, out var payingFaction)
+                    && payingFaction.TreasuryGold >= reward)
+                {
+                    payingFaction.TreasuryGold -= reward;
+                }
+                else
+                {
+                    // Partial payment from whatever is available
+                    var available = issuer.CurrentGold;
+                    issuer.CurrentGold = 0;
+                    if (_state.Factions.TryGetValue(contract.IssuerFactionId, out var partialFaction))
+                    {
+                        available += Math.Min(partialFaction.TreasuryGold, reward - available);
+                        partialFaction.TreasuryGold = Math.Max(0, partialFaction.TreasuryGold - (reward - issuer.CurrentGold));
+                    }
+                    reward = available;
+                }
 
-                _emitter.Emit(new QuestResolved(
+                _state.Player.PersonalGold += reward;
+
+                // MarkSuperseded the contract fact in PlayerHolder
+                if (contractFact is not null)
+                    _state.Knowledge.MarkSuperseded(new State.PlayerHolder(), contractFact, _tickNumber);
+
+                _emitter.Emit(new ContractFulfilled(
                     _state.Date, Core.Enums.SimulationLod.Local,
-                    quest.Template.Id.Value, quest.Id.ToString(),
-                    quest.Title, resolvedStatus, branch.BranchId),
+                    contract.IssuerId, contract.TargetSubjectKey, reward),
                     Core.Enums.SimulationLod.Local);
-                _state.Quests.Resolve(quest);
+
+                questInstance.ResolvedDate = _state.Date;
+                _state.Quests.Resolve(questInstance);
                 break;
+            }
 
             case InvestigateLocalCommand local:
             {
@@ -537,137 +607,6 @@ public sealed class SimulationEngine
                 _state.Player.Notoriety = Math.Clamp(_state.Player.Notoriety + 5f, 0f, 100f);
                 break;
             }
-        }
-    }
-
-    private void ApplyOutcomeActions(
-        IReadOnlyList<Quests.QuestOutcomeAction> actions,
-        Quests.QuestInstance quest,
-        WorldState state,
-        int tickNumber)
-    {
-        foreach (var action in actions)
-        {
-            switch (action)
-            {
-                case Quests.SupersedeTriggerFacts:
-                    foreach (var fact in quest.TriggerFacts)
-                        state.Knowledge.MarkSuperseded(new State.PlayerHolder(), fact, tickNumber);
-                    break;
-
-                case Quests.AddKnowledgeFact af:
-                    var newFact = new State.KnowledgeFact
-                    {
-                        Claim = af.Claim,
-                        Sensitivity = af.Sensitivity,
-                        Confidence = af.Confidence,
-                        BaseConfidence = af.Confidence,
-                        ObservedDate = state.Date,
-                    };
-                    foreach (var holder in af.Holders)
-                    {
-                        state.Knowledge.MarkSuperseded(holder, newFact, tickNumber);
-                        state.Knowledge.AddFact(holder, newFact);
-                    }
-                    break;
-
-                case Quests.EmitRumourAction er:
-                    var portId = er.PortSelector(state);
-                    if (portId.HasValue)
-                        _emitter.Emit(
-                            new Events.RumourSpread(state.Date, Core.Enums.SimulationLod.Regional,
-                                portId.Value, er.Text),
-                            Core.Enums.SimulationLod.Regional);
-                    break;
-            }
-        }
-    }
-
-    /// <summary>
-    /// When the player acts on a disinformation fact, inject a correcting observation
-    /// into their knowledge store. This creates a KnowledgeConflict (or supersedes the lie)
-    /// without ever leaking the IsDisinformation flag to the UI.
-    /// Also degrades the injecting source's reliability.
-    /// </summary>
-    private void InjectDisinformationCorrection(State.KnowledgeFact lie, WorldState state, int tick)
-    {
-        State.KnowledgeFact correction;
-
-        if (lie.Claim is State.ShipLocationClaim slc
-            && state.Ships.TryGetValue(slc.Ship, out var actualShip))
-        {
-            // The ship IS somewhere — reveal its actual location as a direct observation.
-            correction = new State.KnowledgeFact
-            {
-                Claim          = new State.ShipLocationClaim(slc.Ship, actualShip.Location),
-                Sensitivity    = Core.Enums.KnowledgeSensitivity.Public,
-                Confidence     = 0.90f,
-                BaseConfidence = 0.90f,
-                ObservedDate   = state.Date,
-                HopCount       = 0,
-                SourceHolder   = null,
-            };
-        }
-        else
-        {
-            // Generic refutation for other claim types — marks the subject as contested.
-            correction = new State.KnowledgeFact
-            {
-                Claim          = new State.CustomClaim("Disinformation",
-                                     $"The intelligence about '{lie.Claim.GetType().Name.Replace("Claim", "")}' proved false."),
-                Sensitivity    = Core.Enums.KnowledgeSensitivity.Public,
-                Confidence     = 0.90f,
-                BaseConfidence = 0.90f,
-                ObservedDate   = state.Date,
-                HopCount       = 0,
-                SourceHolder   = null,
-            };
-            // Also supersede the original lie so it doesn't keep triggering quests.
-            state.Knowledge.MarkSuperseded(new State.PlayerHolder(), lie, tick);
-        }
-
-        // Adding the correction triggers KnowledgeConflict detection in the store.
-        state.Knowledge.AddFact(new State.PlayerHolder(), correction);
-
-        // Degrade the reliability of whatever source passed this to the player.
-        if (lie.SourceHolder is not null)
-            state.Knowledge.RecordSourceOutcome(lie.SourceHolder, wasAccurate: false);
-
-        // Resolve the deceiving faction from the lie's source holder.
-        // The faction whose controlled port seeded the lie is the deceiver.
-        var deceivingFaction = lie.SourceHolder switch
-        {
-            State.FactionHolder fh => (Core.Ids.FactionId?)fh.Faction,
-            State.PortHolder ph when state.Ports.TryGetValue(ph.Port, out var p) => p.ControllingFactionId,
-            _ => null,
-        };
-
-        if (deceivingFaction.HasValue)
-        {
-            // Emit the event so other systems (and eventually FactionSystem goal-scoring) can react.
-            var exposedAtPort = (correction.Claim is State.ShipLocationClaim slc2)
-                ? (state.Ships.TryGetValue(slc2.Ship, out var s2) && s2.Location is State.AtPort ap2 ? (Core.Ids.PortId?)ap2.Port : null)
-                : null;
-            _emitter.Emit(
-                new Events.DeceptionExposed(state.Date, Core.Enums.SimulationLod.Local,
-                    deceivingFaction.Value, exposedAtPort),
-                Core.Enums.SimulationLod.Local);
-
-            // Seed a fact to the deceiving faction's FactionHolder so their
-            // future decision-making can know the player detected their plant.
-            state.Knowledge.AddFact(
-                new State.FactionHolder(deceivingFaction.Value),
-                new State.KnowledgeFact
-                {
-                    Claim          = new State.CustomClaim("DeceptionExposed",
-                                         $"Deception against player detected and corrected."),
-                    Sensitivity    = Core.Enums.KnowledgeSensitivity.Secret,
-                    Confidence     = 0.90f,
-                    BaseConfidence = 0.90f,
-                    ObservedDate   = state.Date,
-                    HopCount       = 0,
-                    SourceHolder   = null,
-                });
         }
     }
 

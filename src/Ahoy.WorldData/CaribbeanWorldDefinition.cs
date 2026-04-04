@@ -355,6 +355,11 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             cartagena, maracaibo, willemstad  // Spanish Main
         );
 
+        // Seed starting PortConditionFlags — Famine in two ports to drive contract generation
+        state.Ports[merida].Conditions   = PortConditionFlags.Famine;
+        state.Ports[cumana].Conditions   = PortConditionFlags.Famine;
+        state.Ports[montserrat].Conditions = PortConditionFlags.Plague;
+
         return new PortIds(
             veracruz, campeche, merida, havana, santiagoDeCuba,
             portRoyal, tortuga, cayos, santoDomingo, capHaitian,
