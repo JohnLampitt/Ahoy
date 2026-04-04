@@ -39,6 +39,9 @@ public sealed class EconomySystem : IWorldSystem
             // Reputation decay — extreme reputations require active maintenance
             port.PersonalReputation *= 0.99f;
 
+            // PortConditionFlags modifier pass
+            ApplyConditionFlags(port);
+
             // Production and consumption
             ProduceAndConsume(port, lod);
 
@@ -61,6 +64,39 @@ public sealed class EconomySystem : IWorldSystem
 
             // If arrived this tick — process knowledge gossip (KnowledgeSystem handles this;
             // EconomySystem just ensures cargo is exchanged before KnowledgeSystem runs)
+        }
+    }
+
+    private static void ApplyConditionFlags(Port port)
+    {
+        if (port.Conditions == PortConditionFlags.None) return;
+
+        var eco = port.Economy;
+
+        if (port.Conditions.HasFlag(PortConditionFlags.Famine))
+        {
+            // Food and Grain are scarce — multiply effective price by 2.5
+            // We adjust the BasePrice temporarily via a multiplier on Supply (reduce supply to drive price up)
+            // Better approach: adjust BasePrice directly for the tick
+            foreach (var good in new[] { TradeGood.Food })
+            {
+                if (eco.BasePrice.ContainsKey(good))
+                    eco.BasePrice[good] = (int)(eco.BasePrice[good] * 2.5f);
+            }
+        }
+
+        if (port.Conditions.HasFlag(PortConditionFlags.Plague))
+        {
+            port.Prosperity = Math.Clamp(port.Prosperity - 2f, 0f, 100f);
+        }
+
+        if (port.Conditions.HasFlag(PortConditionFlags.GoodHarvest))
+        {
+            foreach (var good in new[] { TradeGood.Sugar, TradeGood.Tobacco })
+            {
+                if (eco.BasePrice.ContainsKey(good))
+                    eco.BasePrice[good] = (int)(eco.BasePrice[good] * 0.6f);
+            }
         }
     }
 

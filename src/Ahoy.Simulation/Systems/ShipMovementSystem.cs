@@ -219,6 +219,26 @@ public sealed class ShipMovementSystem : IWorldSystem
             ? new IndividualHolder(ship.CaptainId.Value)
             : new ShipHolder(ship.Id);
 
+        // Bounty route evaluation for Privateers and Pirate Captains
+        if (ship.CaptainId.HasValue
+            && state.Individuals.TryGetValue(ship.CaptainId.Value, out var npcCaptain)
+            && (npcCaptain.Role == IndividualRole.Privateer
+                || npcCaptain.Role == IndividualRole.PirateCaptain))
+        {
+            var bountyDest = EvaluateBountyRoute(ship, npcCaptain, currentRegion, state);
+            if (bountyDest.HasValue)
+            {
+                ship.RoutingDestination = bountyDest;
+                var nextReg = FindNextRegion(currentRegion, state.Ports[bountyDest.Value].RegionId, state);
+                if (nextReg.HasValue)
+                {
+                    var travelDays = GetTravelDays(currentRegion, nextReg.Value, state);
+                    ship.Location = new EnRoute(currentRegion, nextReg.Value, 0f, travelDays);
+                }
+                return;
+            }
+        }
+
         // Find the highest-confidence known port that is accessible from current region.
         // Agent routes toward what they know, not what is objectively best.
         var accessiblePortIds = GetAccessiblePortIds(currentRegion, state);
@@ -248,6 +268,63 @@ public sealed class ShipMovementSystem : IWorldSystem
             var travelDays = GetTravelDays(currentRegion, nextRegion.Value, state);
             ship.Location = new EnRoute(currentRegion, nextRegion.Value, 0f, travelDays);
         }
+    }
+
+    private PortId? EvaluateBountyRoute(Ship ship, Individual captain, RegionId currentRegion,
+        WorldState state)
+    {
+        var captainHolder = new IndividualHolder(captain.Id);
+        var captainFacts = state.Knowledge.GetFacts(captainHolder)
+            .Where(f => !f.IsSuperseded)
+            .ToList();
+
+        PortId? bestPort = null;
+        float bestUtility = 100f; // minimum threshold
+
+        foreach (var contractFact in captainFacts.Where(f => f.Claim is ContractClaim cc
+            && cc.Condition == ContractConditionType.TargetDestroyed))
+        {
+            var contract = (ContractClaim)contractFact.Claim;
+
+            // Find a ShipLocationClaim for the target
+            var intelFact = captainFacts.FirstOrDefault(f =>
+                f.Claim is ShipLocationClaim slc
+                && KnowledgeFact.GetSubjectKey(f.Claim) == contract.TargetSubjectKey);
+
+            if (intelFact is null) continue;
+
+            // Determine last known region of target
+            var targetLocation = ((ShipLocationClaim)intelFact.Claim).LastKnownLocation;
+            RegionId targetRegion;
+            if (targetLocation is AtSea ats)
+                targetRegion = ats.Region;
+            else if (targetLocation is AtPort atp && state.Ports.TryGetValue(atp.Port, out var tp))
+                targetRegion = tp.RegionId;
+            else if (targetLocation is EnRoute er)
+                targetRegion = er.To;
+            else
+                continue;
+
+            // Find accessible ports in that region
+            var portsInRegion = state.Ports.Values
+                .Where(p => p.RegionId == targetRegion)
+                .ToList();
+            if (portsInRegion.Count == 0) continue;
+
+            var distanceInTicks = currentRegion == targetRegion
+                ? 1f
+                : GetTravelDays(currentRegion, targetRegion, state);
+
+            var utility = (contract.GoldReward * intelFact.Confidence) / distanceInTicks;
+
+            if (utility > bestUtility)
+            {
+                bestUtility = utility;
+                bestPort = portsInRegion[0].Id; // pick any port in target region
+            }
+        }
+
+        return bestPort;
     }
 
     private HashSet<PortId> GetAccessiblePortIds(RegionId from, WorldState state)

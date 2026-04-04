@@ -85,21 +85,8 @@ public sealed class SimulationHarness
                     PrintQuests();
                     break;
 
-                case "choose" when parts.Length == 3:
-                    // choose <n|questPrefix> <branchId>
-                    ChooseBranch(parts[1], parts[2]);
-                    break;
+                // 'choose' is no longer supported — contracts are resolved mechanically
 
-                case "choose" when parts.Length == 2:
-                    // choose <branchId>  — shorthand when only one quest is active
-                    var onlyQuest = _engine.State.Quests.ActiveQuests;
-                    if (onlyQuest.Count == 1)
-                        ChooseBranch(onlyQuest[0].Id.ToString(), parts[1]);
-                    else if (onlyQuest.Count == 0)
-                        System.Console.WriteLine("  No active quests.");
-                    else
-                        System.Console.WriteLine("  Multiple active quests — use: choose <n> <branch>  (n = 1, 2, ...)");
-                    break;
 
                 case "help":
                     PrintHelp();
@@ -189,9 +176,10 @@ public sealed class SimulationHarness
                 BribeRejected br           => $"😤 Bribe rejected by {IndividualName(br.GovernorId)} at {PortName(br.PortId)}",
                 AgentBurned ab             => $"🔥 Agent burned: {IndividualName(ab.AgentId)}",
                 QuestActivated qa          => $"📜 Quest available: {qa.Title}",
-                QuestResolved qr           => qr.Status == Ahoy.Simulation.Quests.QuestStatus.Completed
-                    ? $"📜 Quest resolved ({qr.ChosenBranchId}): {qr.Title}"
-                    : $"📜 Quest expired: {qr.Title}",
+                QuestResolved qr           => qr.Status == Ahoy.Simulation.Quests.ContractQuestStatus.Fulfilled
+                    ? $"📜 Contract fulfilled: {qr.Title}"
+                    : $"📜 Contract {qr.Status}: {qr.Title}",
+                ContractFulfilled cf       => $"💰 Contract paid: {cf.GoldPaid}g for {cf.TargetSubjectKey}",
                 KnowledgeConflictDetected kcd => $"⚠  Knowledge conflict: {kcd.SubjectKey}",
                 DeceptionExposed de        => $"🔍 Deception exposed (faction: {FactionName(de.DeceivingFactionId)})",
                 _                          => null,   // suppress other noise
@@ -319,75 +307,30 @@ public sealed class SimulationHarness
 
     private void PrintQuests()
     {
-        var active = _engine.State.Quests.ActiveQuests;
+        var active = _engine.State.Quests.ActiveContractQuests;
         System.Console.WriteLine();
 
         if (active.Count == 0)
         {
-            System.Console.WriteLine("  No active quests.");
+            System.Console.WriteLine("  No active contract quests.");
             return;
         }
 
-        System.Console.WriteLine($"  Active quests: {active.Count}");
-
-        var playerFacts = _engine.State.Knowledge.GetFacts(
-            new Ahoy.Simulation.State.PlayerHolder())
-            .Where(f => !f.IsSuperseded).ToList();
+        System.Console.WriteLine($"  Active contract quests: {active.Count}");
 
         foreach (var (q, i) in active.Select((q, i) => (q, i + 1)))
         {
+            var target = q.Contract.TargetSubjectKey;
+            var reward = q.Contract.GoldReward;
+            var status = q.Status;
             System.Console.WriteLine();
-            System.Console.WriteLine($"  [{i}] {q.Title}  ({q.Id})");
-            System.Console.WriteLine($"     {q.DisplayDialogue}");
-            System.Console.WriteLine($"     NPC: {q.DisplayNpcName}   Activated: {q.ActivatedDate}");
-
-            if (q.TriggerFacts.Count > 0)
-            {
-                System.Console.WriteLine("     Trigger facts:");
-                foreach (var f in q.TriggerFacts)
-                {
-                    var corr = f.CorroborationCount > 0 ? $"  corr:{f.CorroborationCount}" : "";
-                    var src = FormatSourceHolder(f.SourceHolder);
-                    System.Console.WriteLine($"       [{f.Confidence:P0}] {f.Claim.GetType().Name.Replace("Claim", ""),-22}  hops:{f.HopCount}{corr}  src:{src}");
-                }
-            }
-
-            System.Console.WriteLine("     Branches:");
-            foreach (var b in q.Template.Branches)
-            {
-                if (b.AvailabilityCondition is not null && !b.AvailabilityCondition(playerFacts))
-                    continue;
-                System.Console.WriteLine($"       choose {q.Id} {b.BranchId,-18}  {b.Label}");
-            }
+            System.Console.WriteLine($"  [{i}] {target}  ({q.Id})");
+            System.Console.WriteLine($"     Condition : {q.Contract.Condition}");
+            System.Console.WriteLine($"     Reward    : {reward}g");
+            System.Console.WriteLine($"     Status    : {status}");
+            System.Console.WriteLine($"     Activated : {q.ActivatedDate}");
+            System.Console.WriteLine($"     Archetype : {q.Contract.Archetype}");
         }
-    }
-
-    private void ChooseBranch(string questPrefix, string branchId)
-    {
-        var active = _engine.State.Quests.ActiveQuests;
-
-        // Numeric index: "1" = first active quest, "2" = second, etc.
-        var quest = int.TryParse(questPrefix, out var idx) && idx >= 1 && idx <= active.Count
-            ? active[idx - 1]
-            : active.FirstOrDefault(q => q.Id.ToString().Contains(questPrefix, StringComparison.OrdinalIgnoreCase));
-
-        if (quest is null)
-        {
-            System.Console.WriteLine($"  No active quest matching '{questPrefix}'.");
-            return;
-        }
-
-        var branch = quest.Template.Branches.FirstOrDefault(b =>
-            b.BranchId.Equals(branchId, StringComparison.OrdinalIgnoreCase));
-
-        if (branch is null)
-        {
-            System.Console.WriteLine($"  Unknown branch '{branchId}' for quest '{quest.Template.Title}'.");
-            return;
-        }
-
-        _engine.EnqueueCommand(new Ahoy.Simulation.Engine.ChooseQuestBranchCommand(quest.Id, branch.BranchId));
-        System.Console.WriteLine($"  Choice queued — '{branch.Label}' will resolve next tick.");
     }
 
     private void PrintPlayerKnowledge()
@@ -440,9 +383,7 @@ public sealed class SimulationHarness
         System.Console.WriteLine("    ships         — all ship positions");
         System.Console.WriteLine("    weather       — weather by region");
         System.Console.WriteLine("    knowledge     — player's current knowledge facts");
-        System.Console.WriteLine("    quests        — active quests and branches");
-        System.Console.WriteLine("    choose <branch>      — choose branch (when one quest active)");
-        System.Console.WriteLine("    choose <n> <branch>  — choose branch of quest n (1, 2, ...)");
+        System.Console.WriteLine("    quests        — active contract quests");
         System.Console.WriteLine("    help          — this message");
         System.Console.WriteLine("    quit          — exit");
     }

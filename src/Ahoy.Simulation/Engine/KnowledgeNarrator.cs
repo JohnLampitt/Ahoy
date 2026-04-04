@@ -1,4 +1,5 @@
 using Ahoy.Core.ValueObjects;
+using Ahoy.Simulation.Quests;
 using Ahoy.Simulation.State;
 
 namespace Ahoy.Simulation.Engine;
@@ -97,6 +98,25 @@ public static class KnowledgeNarrator
             <= 30 => $"This is {days}-day-old intelligence — treat it as somewhat stale.",
             _     => $"This is {days} days old — it may be badly out of date.",
         };
+    }
+
+    // ---- Contract prompt ----
+
+    public static string DescribeContractPrompt(
+        KnowledgeFact contractFact, NarrativeArchetype archetype, WorldDate currentDate)
+    {
+        var epistemic = Describe(contractFact, false, currentDate);
+        var contract = (ContractClaim)contractFact.Claim;
+        var archetypeInstruction = archetype switch
+        {
+            NarrativeArchetype.PoliticalBounty    => "You are an official representative. Speak formally. Use coded language about law and order.",
+            NarrativeArchetype.UnderworldHit      => "You speak in whispers. Never name your employer. Imply consequences for failure.",
+            NarrativeArchetype.DesperatePlea      => "You are desperate. Show vulnerability. Make the stakes personal.",
+            NarrativeArchetype.ColonialCommission => "You are military. Be direct, clipped, professional. Mention letters of marque.",
+            NarrativeArchetype.PirateRival        => "You are a pirate. Be blunt, threatening. Offer brotherhood solidarity as subtext.",
+            _                                     => "Be direct."
+        };
+        return $"{archetypeInstruction} {epistemic.ToPromptFragment()} Target: {contract.TargetSubjectKey}. Reward: {contract.GoldReward} gold.";
     }
 
     // ---- Corroboration ----

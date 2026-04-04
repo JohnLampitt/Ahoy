@@ -185,5 +185,8 @@ public record QuestActivated(
 public record QuestResolved(
     WorldDate Date, SimulationLod SourceLod,
     string QuestTemplateId, string QuestInstanceId,
-    string Title, Quests.QuestStatus Status,
-    string? ChosenBranchId) : WorldEvent(Date, SourceLod);
+    string Title, Quests.ContractQuestStatus Status) : WorldEvent(Date, SourceLod);
+
+public record ContractFulfilled(
+    WorldDate Date, SimulationLod SourceLod,
+    IndividualId IssuerId, string TargetSubjectKey, int GoldPaid) : WorldEvent(Date, SourceLod);

@@ -1,4 +1,5 @@
 using Ahoy.Core.Enums;
+using Ahoy.Core.Ids;
 using Ahoy.Simulation.Engine;
 using Ahoy.Simulation.Events;
 using Ahoy.Simulation.Quests;
@@ -8,100 +9,186 @@ namespace Ahoy.Simulation.Systems;
 
 /// <summary>
 /// System 7 — runs after KnowledgeSystem.
-/// Each tick:
-///   1. Checks expiry on all active quests.
-///   2. Evaluates trigger conditions for registered templates against the player's knowledge.
-///   3. Instantiates new QuestInstances for triggered templates.
-/// Branch resolution (player choice) is handled in SimulationEngine.ApplyCommand.
+/// Contract-only quest system:
+///   1. Ticks active contract quests (fulfillment checks, LostTrail, expiry).
+///   2. Scans player ContractClaims and activates new ContractQuestInstances.
 /// </summary>
 public sealed class QuestSystem : IWorldSystem
 {
-    private readonly IReadOnlyList<QuestTemplate> _templates;
-
-    public QuestSystem(IReadOnlyList<QuestTemplate> templates)
-    {
-        _templates = templates;
-    }
-
     public void Tick(WorldState state, SimulationContext context, IEventEmitter events)
     {
-        var playerFacts = state.Knowledge.GetFacts(new PlayerHolder())
+        TickActiveContractQuests(state, context, events);
+        ScanForContractQuests(state, context, events);
+    }
+
+    // ---- Active quest maintenance ----
+
+    private static void TickActiveContractQuests(WorldState state, SimulationContext context,
+        IEventEmitter events)
+    {
+        var playerHolder = new PlayerHolder();
+
+        foreach (var quest in state.Quests.ActiveContractQuests.ToList())
+        {
+            if (quest.Status != ContractQuestStatus.Active
+                && quest.Status != ContractQuestStatus.LostTrail)
+                continue;
+
+            var contract = quest.Contract;
+
+            // --- Check fulfillment ---
+            bool fulfilled = false;
+            if (contract.Condition == ContractConditionType.TargetDestroyed)
+            {
+                if (TryParseShipId(contract.TargetSubjectKey, out var targetShipId)
+                    && state.Ships.TryGetValue(targetShipId, out var targetShip)
+                    && targetShip.HullIntegrity <= 0)
+                {
+                    fulfilled = true;
+                }
+            }
+            else if (contract.Condition == ContractConditionType.TargetDead)
+            {
+                if (TryParseIndividualId(contract.TargetSubjectKey, out var targetIndId)
+                    && state.Individuals.TryGetValue(targetIndId, out var targetInd)
+                    && !targetInd.IsAlive)
+                {
+                    fulfilled = true;
+                }
+            }
+
+            if (fulfilled)
+            {
+                quest.Status = ContractQuestStatus.Fulfilled;
+                quest.ResolvedDate = state.Date;
+                events.Emit(new QuestResolved(
+                    state.Date, SimulationLod.Local,
+                    $"Contract:{contract.IssuerId.Value}:{contract.TargetSubjectKey}",
+                    quest.Id.ToString(),
+                    $"Contract fulfilled: {contract.TargetSubjectKey}",
+                    ContractQuestStatus.Fulfilled),
+                    SimulationLod.Local);
+                continue;
+            }
+
+            // --- Check LostTrail: intel confidence dropped below 0.50 ---
+            var intelFact = state.Knowledge.GetFacts(playerHolder)
+                .FirstOrDefault(f => !f.IsSuperseded
+                    && KnowledgeFact.GetSubjectKey(f.Claim) == contract.TargetSubjectKey);
+
+            if (intelFact is null || intelFact.Confidence < 0.50f)
+            {
+                if (quest.Status == ContractQuestStatus.Active)
+                    quest.Status = ContractQuestStatus.LostTrail;
+            }
+            else if (quest.Status == ContractQuestStatus.LostTrail)
+            {
+                // Intel recovered
+                quest.Status = ContractQuestStatus.Active;
+            }
+
+            // --- Check Expired: contract claim decayed below 0.20 ---
+            var contractFactId = quest.ContractFactId;
+            var contractFact = state.Knowledge.GetFacts(playerHolder)
+                .FirstOrDefault(f => f.Id == contractFactId);
+
+            if (contractFact is null || contractFact.Confidence < 0.20f)
+            {
+                quest.Status = ContractQuestStatus.Expired;
+                quest.ResolvedDate = state.Date;
+                state.Quests.RecordCooldown(contract.TargetSubjectKey, state.Date.Advance(20));
+                state.Quests.Resolve(quest);
+                events.Emit(new QuestResolved(
+                    state.Date, SimulationLod.Local,
+                    $"Contract:{contract.IssuerId.Value}:{contract.TargetSubjectKey}",
+                    quest.Id.ToString(),
+                    $"Contract expired: {contract.TargetSubjectKey}",
+                    ContractQuestStatus.Expired),
+                    SimulationLod.Local);
+            }
+        }
+    }
+
+    // ---- New quest activation ----
+
+    private static void ScanForContractQuests(WorldState state, SimulationContext context,
+        IEventEmitter events)
+    {
+        var playerHolder = new PlayerHolder();
+        var playerFacts = state.Knowledge.GetFacts(playerHolder)
             .Where(f => !f.IsSuperseded)
             .ToList();
 
-        // 1. Expire active quests
-        foreach (var instance in state.Quests.ActiveQuests.ToList())
+        // Find ContractClaim facts with Confidence > 0.40
+        var contractFacts = playerFacts
+            .Where(f => f.Claim is ContractClaim && f.Confidence > 0.40f)
+            .ToList();
+
+        foreach (var contractFact in contractFacts)
         {
-            // Primary: natural decay — the trigger condition no longer holds in the player's knowledge.
-            // This honours the design goal: "knowledge-gated, not timer-gated."
-            var naturallyExpired = !EvaluateCondition(instance.Template.TriggerCondition, playerFacts);
-            // Backstop: each template's own hard timer. Keeps per-template calibration;
-            // prevents phantom quests if a false fact gets stuck in an echo chamber.
-            var timedOut = instance.Template.ExpiryPredicate(instance, state);
+            var contract = (ContractClaim)contractFact.Claim;
 
-            if (!naturallyExpired && !timedOut) continue;
-
-            // Record a 20-tick cooldown so the same rumour doesn't immediately re-trigger.
-            var subjectKey = instance.TriggerFacts.Count > 0
-                ? KnowledgeFact.GetSubjectKey(instance.TriggerFacts[0].Claim)
-                : instance.Template.Id.Value;
-            state.Quests.RecordCooldown(instance.Template.Id, subjectKey, state.Date.Advance(20));
-
-            instance.Status       = QuestStatus.Expired;
-            instance.ResolvedDate = state.Date;
-            state.Quests.Resolve(instance);
-            events.Emit(new QuestResolved(
-                state.Date, SimulationLod.Local,
-                instance.Template.Id.Value, instance.Id.ToString(),
-                instance.Title, QuestStatus.Expired, null),
-                SimulationLod.Local);
-        }
-
-        // 2. Check all templates for new triggers
-        foreach (var template in _templates)
-        {
-            if (!template.AllowDuplicateInstances && state.Quests.HasActiveInstance(template.Id))
+            // Dedup: already have an active quest for this target
+            if (state.Quests.HasActiveContractQuest(contract.TargetSubjectKey))
                 continue;
 
-            if (!EvaluateCondition(template.TriggerCondition, playerFacts))
+            // Cooldown check
+            if (state.Quests.IsOnCooldown(contract.TargetSubjectKey, state.Date))
                 continue;
 
-            var triggerFacts = template.TriggerFactSelector(playerFacts);
+            // Intel gate: require a separate fact about TargetSubjectKey with Confidence > 0.50
+            var intelFact = playerFacts
+                .FirstOrDefault(f => KnowledgeFact.GetSubjectKey(f.Claim) == contract.TargetSubjectKey
+                    && f.Confidence > 0.50f);
 
-            // Cooldown guard: don't re-trigger the same quest on the same subject too soon.
-            var subjectKey = triggerFacts.Count > 0
-                ? KnowledgeFact.GetSubjectKey(triggerFacts[0].Claim)
-                : template.Id.Value;
-            if (state.Quests.IsOnCooldown(template.Id, subjectKey, state.Date))
+            if (intelFact is null)
                 continue;
 
-            var title = template.TitleFactory?.Invoke(triggerFacts) ?? template.Title;
-            var instance = new QuestInstance
+            // Activate quest
+            var promptFragment = KnowledgeNarrator.DescribeContractPrompt(
+                contractFact, contract.Archetype, state.Date);
+
+            var instance = new ContractQuestInstance
             {
-                Template      = template,
+                ContractFactId = contractFact.Id,
+                Contract = contract,
                 ActivatedDate = state.Date,
-                TriggerFacts  = triggerFacts,
-                Title         = title,
+                NarrativePromptFragment = promptFragment,
             };
+
             state.Quests.AddActive(instance);
-            // Prevent the same fact from triggering another instance for 20 ticks,
-            // even when AllowDuplicateInstances = true. Without this, every tick while
-            // the fact exists creates a new instance before the first one can expire.
-            state.Quests.RecordCooldown(template.Id, subjectKey, state.Date.Advance(20));
+            state.Quests.RecordCooldown(contract.TargetSubjectKey, state.Date.Advance(20));
+
             events.Emit(new QuestActivated(
                 state.Date, SimulationLod.Local,
-                template.Id.Value, instance.Id.ToString(),
-                title),
+                $"Contract:{contract.IssuerId.Value}:{contract.TargetSubjectKey}",
+                instance.Id.ToString(),
+                $"Contract: {contract.TargetSubjectKey} ({contract.Condition}) — {contract.GoldReward}g"),
                 SimulationLod.Local);
         }
     }
 
-    private static bool EvaluateCondition(QuestCondition condition, IReadOnlyList<KnowledgeFact> facts)
-        => condition switch
-        {
-            FactCondition fc => facts.Any(fc.Predicate),
-            AndCondition ac  => ac.Children.All(c => EvaluateCondition(c, facts)),
-            OrCondition oc   => oc.Children.Any(c => EvaluateCondition(c, facts)),
-            _                => false,
-        };
+    // ---- Helpers ----
+
+    private static bool TryParseShipId(string subjectKey, out ShipId shipId)
+    {
+        shipId = default;
+        // Format: "Ship:{guid}"
+        if (!subjectKey.StartsWith("Ship:", StringComparison.OrdinalIgnoreCase)) return false;
+        var guidStr = subjectKey["Ship:".Length..];
+        if (!Guid.TryParse(guidStr, out var guid)) return false;
+        shipId = new ShipId(guid);
+        return true;
+    }
+
+    private static bool TryParseIndividualId(string subjectKey, out IndividualId individualId)
+    {
+        individualId = default;
+        // Format: "Individual:{guid}"
+        if (!subjectKey.StartsWith("Individual:", StringComparison.OrdinalIgnoreCase)) return false;
+        var guidStr = subjectKey["Individual:".Length..];
+        if (!Guid.TryParse(guidStr, out var guid)) return false;
+        individualId = new IndividualId(guid);
+        return true;
+    }
 }
