@@ -3,6 +3,24 @@ using Ahoy.Core.Ids;
 
 namespace Ahoy.Simulation.State;
 
+// ---- Contract enums ----
+
+public enum NarrativeArchetype
+{
+    PoliticalBounty,
+    UnderworldHit,
+    DesperatePlea,
+    ColonialCommission,
+    PirateRival,
+}
+
+public enum ContractConditionType
+{
+    TargetDestroyed,
+    TargetDead,
+    GoodsDelivered,
+}
+
 // ---- Knowledge holder union ----
 
 public abstract record KnowledgeHolderId;
@@ -29,6 +47,14 @@ public record IndividualStatusClaim(IndividualId Individual, IndividualRole Role
 public record ShipStatusClaim(ShipId Ship, bool IsDestroyed, RegionId? LastKnownRegion) : KnowledgeClaim;
 public record PlayerActionClaim(string QuestTemplateId, string BranchId, PortId? Location) : KnowledgeClaim;
 public record CustomClaim(string Subject, string Detail) : KnowledgeClaim;
+
+public record ContractClaim(
+    IndividualId IssuerId,
+    FactionId IssuerFactionId,
+    string TargetSubjectKey,
+    ContractConditionType Condition,
+    int GoldReward,
+    NarrativeArchetype Archetype = NarrativeArchetype.PoliticalBounty) : KnowledgeClaim;
 
 // ---- KnowledgeFact ----
 
@@ -132,6 +158,7 @@ public sealed class KnowledgeFact
         // Each distinct quest resolution is its own subject — two A1 completions on different ships don't supersede each other.
         PlayerActionClaim c        => $"PlayerAction:{c.QuestTemplateId}:{c.BranchId}",
         CustomClaim c              => $"Custom:{c.Subject}",
+        ContractClaim c            => $"Contract:{c.IssuerId.Value}:{c.TargetSubjectKey}",
         _                          => claim.GetType().Name,
     };
 }

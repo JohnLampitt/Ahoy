@@ -2,6 +2,16 @@ using Ahoy.Core.Ids;
 
 namespace Ahoy.Simulation.State;
 
+[Flags]
+public enum PortConditionFlags
+{
+    None        = 0,
+    Famine      = 1 << 0,
+    Plague      = 1 << 1,
+    GoodHarvest = 1 << 2,
+    Blockaded   = 1 << 3,
+}
+
 public sealed class Port
 {
     public PortId Id { get; init; }
@@ -42,4 +52,5 @@ public sealed class Port
     // --- Flags ---
     public bool IsPirateHaven { get; set; }
     public bool IsNeutral { get; set; }
+    public PortConditionFlags Conditions { get; set; } = PortConditionFlags.None;
 }
