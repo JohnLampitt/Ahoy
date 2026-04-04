@@ -116,7 +116,15 @@ public static class KnowledgeNarrator
             NarrativeArchetype.PirateRival        => "You are a pirate. Be blunt, threatening. Offer brotherhood solidarity as subtext.",
             _                                     => "Be direct."
         };
-        return $"{archetypeInstruction} {epistemic.ToPromptFragment()} Target: {contract.TargetSubjectKey}. Reward: {contract.GoldReward} gold.";
+        var conditionNote = contract.Condition switch
+        {
+            ContractConditionType.GoodsDelivered  =>
+                $" Deliver at least 20 units of Food to port {contract.TargetSubjectKey.Split(':').ElementAtOrDefault(1) ?? "?"} (starving population).",
+            ContractConditionType.TargetDestroyed => " Destroy the target vessel.",
+            ContractConditionType.TargetDead      => " Eliminate the target individual.",
+            _                                     => string.Empty,
+        };
+        return $"{archetypeInstruction} {epistemic.ToPromptFragment()} Target: {contract.TargetSubjectKey}. Reward: {contract.GoldReward} gold.{conditionNote}";
     }
 
     // ---- Corroboration ----

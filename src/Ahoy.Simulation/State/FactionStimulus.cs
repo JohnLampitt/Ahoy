@@ -14,6 +14,13 @@ public sealed class FactionStimulus
     public float Magnitude { get; init; }
     public required string Description { get; init; }
 
+    /// <summary>
+    /// True when the deception that triggered this stimulus was planted by the player
+    /// (OriginatingAgentId is null on the disinformation fact).
+    /// Used by FactionSystem to decide whether to target the player with retaliation.
+    /// </summary>
+    public bool PlayerIsOrigin { get; init; }
+
     // Optional context
     public RegionId? RegionId { get; init; }
     public PortId? PortId { get; init; }

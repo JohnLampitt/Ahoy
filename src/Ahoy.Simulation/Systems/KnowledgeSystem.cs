@@ -75,11 +75,14 @@ public sealed class KnowledgeSystem : IWorldSystem
 
         // 4. Prune expired facts (keep superseded for one tick)
         state.Knowledge.PruneExpired(tick);
+
+        // 5. Detect and supersede disinformation contradicted by high-confidence truth facts
+        DetectDisinformationContradictions(state, tick);
     }
 
     // ---- Event ingestion ----
 
-    private static void IngestEvent(WorldEvent worldEvent, WorldState state, SimulationContext context, int tick)
+    private void IngestEvent(WorldEvent worldEvent, WorldState state, SimulationContext context, int tick)
     {
         var baseConfidence = LodToConfidence(worldEvent.SourceLod);
 
@@ -181,9 +184,11 @@ public sealed class KnowledgeSystem : IWorldSystem
                 // Shares the "Individual:{id}" subject key with IndividualWhereaboutsClaim
                 // so it automatically supersedes any live location claim for the same person.
                 if (!state.Individuals.TryGetValue(ev.IndividualId, out var deceased)) break;
+                // Use ClaimedFactionId as public-facing faction for infiltrators
+                var publicFactionId = deceased.ClaimedFactionId ?? deceased.FactionId;
                 var deathFact = new KnowledgeFact
                 {
-                    Claim          = new IndividualStatusClaim(ev.IndividualId, deceased.Role, deceased.FactionId, IsAlive: false),
+                    Claim          = new IndividualStatusClaim(ev.IndividualId, deceased.Role, publicFactionId, IsAlive: false),
                     Sensitivity    = KnowledgeSensitivity.Restricted,
                     Confidence     = 0.80f,
                     BaseConfidence = 0.80f,
@@ -195,7 +200,109 @@ public sealed class KnowledgeSystem : IWorldSystem
                     AddAndSupersede(state.Knowledge, new PortHolder(deceased.LocationPortId.Value), deathFact, tick);
                 if (worldEvent.SourceLod == SimulationLod.Local)
                     AddAndSupersede(state.Knowledge, new PlayerHolder(), deathFact, tick);
+
+                // If deceased was an infiltrator and player witnessed it locally, reveal actual allegiance
+                if (worldEvent.SourceLod == SimulationLod.Local && deceased.IsInfiltrator)
+                {
+                    var deathRevealClaim = new IndividualAllegianceClaim(
+                        deceased.Id,
+                        ClaimedFaction: deceased.ClaimedFactionId!.Value,
+                        ActualFaction:  deceased.FactionId ?? default);
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), new KnowledgeFact
+                    {
+                        Claim = deathRevealClaim,
+                        Sensitivity = KnowledgeSensitivity.Secret,
+                        Confidence = 0.95f, BaseConfidence = 0.95f,
+                        ObservedDate = ev.Date, IsDecayExempt = true,
+                        HopCount = 0, SourceHolder = null,
+                    }, tick);
+                    _emitter.Emit(new AllegianceRevealed(
+                        state.Date, SimulationLod.Local,
+                        deceased.Id,
+                        ActualFaction:  deceased.FactionId!.Value,
+                        ClaimedFaction: deceased.ClaimedFactionId!.Value), SimulationLod.Local);
+                }
                 break;
+
+            case PoiDiscovered pd:
+            {
+                if (!state.OceanPois.TryGetValue(pd.PoiId, out var poi2)) break;
+                // Use DeriveStatus() — never embed raw gold amounts in gossip
+                var claim = new OceanPoiClaim(poi2.Id, poi2.RegionId, poi2.Type,
+                    poi2.IsDiscovered, poi2.DeriveStatus());
+                var sensitivity = KnowledgeSensitivity.Public;
+                var conf = worldEvent.SourceLod == SimulationLod.Local ? 0.95f
+                         : worldEvent.SourceLod == SimulationLod.Regional ? 0.65f : 0.35f;
+
+                var poiFact = new KnowledgeFact
+                {
+                    Claim = claim, Sensitivity = sensitivity,
+                    Confidence = conf, BaseConfidence = conf,
+                    ObservedDate = pd.Date, HopCount = 0, SourceHolder = null,
+                };
+
+                AddAndSupersede(state.Knowledge, new ShipHolder(pd.DiscoveredBy), poiFact, tick);
+                if (worldEvent.SourceLod == SimulationLod.Local)
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), poiFact, tick);
+
+                // Seed to nearest port in the POI's region at reduced confidence (Regional gossip)
+                var nearestPort = state.Ports.Values
+                    .Where(p => p.RegionId == poi2.RegionId)
+                    .FirstOrDefault();
+                if (nearestPort is not null)
+                {
+                    var portConf = conf * 0.6f;
+                    var portPoiFact = new KnowledgeFact
+                    {
+                        Claim = claim, Sensitivity = KnowledgeSensitivity.Public,
+                        Confidence = portConf, BaseConfidence = portConf,
+                        ObservedDate = pd.Date, HopCount = 1,
+                        SourceHolder = new ShipHolder(pd.DiscoveredBy),
+                    };
+                    AddAndSupersede(state.Knowledge, new PortHolder(nearestPort.Id), portPoiFact, tick);
+                }
+                break;
+            }
+
+            case PoiEncountered pe:
+            {
+                if (!state.OceanPois.TryGetValue(pe.PoiId, out var poi3)) break;
+                var updatedClaim = new OceanPoiClaim(poi3.Id, poi3.RegionId, poi3.Type,
+                    poi3.IsDiscovered, poi3.DeriveStatus());
+
+                // Player sees it directly at full confidence
+                if (worldEvent.SourceLod == SimulationLod.Local)
+                {
+                    AddAndSupersede(state.Knowledge, new PlayerHolder(), new KnowledgeFact
+                    {
+                        Claim = updatedClaim, Sensitivity = KnowledgeSensitivity.Public,
+                        Confidence = 0.95f, BaseConfidence = 0.95f,
+                        ObservedDate = pe.Date, HopCount = 0, SourceHolder = null,
+                    }, tick);
+                }
+
+                // NPC encounter: seed a Regional-confidence rumour to nearby ports
+                // regardless of LOD. This is how players hear "the cache was raided"
+                // before sailing there themselves. Only seed loot/damage outcomes.
+                if (pe.GoldFound > 0 || pe.HullDamage > 0f)
+                {
+                    var gossipConf = worldEvent.SourceLod == SimulationLod.Local ? 0.70f : 0.40f;
+                    var nearestGossipPort = state.Ports.Values
+                        .Where(p => p.RegionId == poi3.RegionId)
+                        .FirstOrDefault();
+                    if (nearestGossipPort is not null)
+                    {
+                        AddAndSupersede(state.Knowledge, new PortHolder(nearestGossipPort.Id), new KnowledgeFact
+                        {
+                            Claim = updatedClaim, Sensitivity = KnowledgeSensitivity.Public,
+                            Confidence = gossipConf, BaseConfidence = gossipConf,
+                            ObservedDate = pe.Date, HopCount = 1,
+                            SourceHolder = new ShipHolder(pe.ShipId),
+                        }, tick);
+                    }
+                }
+                break;
+            }
 
             case ShipDestroyed sd:
                 // Ship destroyed in combat: knowledge goes into the attacker's ShipHolder.
@@ -523,6 +630,61 @@ public sealed class KnowledgeSystem : IWorldSystem
         PortHolder ph when state.Ports.TryGetValue(ph.Port, out var p) => p.ControllingFactionId,
         _                                                              => null,
     };
+
+    /// <summary>
+    /// Scans every holder for disinformation facts that are now directly contradicted
+    /// by a non-disinformation fact with higher confidence (> 0.70) for the same subject key.
+    /// When detected, supersedes the lie and triggers FactionStimulus.
+    /// </summary>
+    private void DetectDisinformationContradictions(WorldState state, int tick)
+    {
+        var byHolderAndSubject = state.Knowledge.GetAllFactsWithHolders()
+            .Where(t => !t.Fact.IsSuperseded)
+            .GroupBy(t => (t.Holder, Key: KnowledgeFact.GetSubjectKey(t.Fact.Claim)));
+
+        foreach (var group in byHolderAndSubject)
+        {
+            var facts = group.ToList();
+            var disinfoFacts = facts.Where(t => t.Fact.IsDisinformation).ToList();
+            if (disinfoFacts.Count == 0) continue;
+
+            var truthFacts = facts
+                .Where(t => !t.Fact.IsDisinformation && t.Fact.Confidence > 0.70f)
+                .ToList();
+            if (truthFacts.Count == 0) continue;
+
+            foreach (var (holder, disFact) in disinfoFacts)
+            {
+                bool contradicted = truthFacts.Any(t =>
+                    t.Fact.Claim.GetType() != disFact.Claim.GetType()
+                    || !t.Fact.Claim.Equals(disFact.Claim));
+                if (!contradicted) continue;
+
+                state.Knowledge.MarkSuperseded(holder, disFact, tick);
+
+                if (disFact.SourceHolder is not null)
+                    state.Knowledge.RecordSourceOutcome(disFact.SourceHolder, wasAccurate: false);
+
+                FactionId? deceiverFactionId = (disFact.SourceHolder as FactionHolder)?.Faction;
+                if (!deceiverFactionId.HasValue) continue;
+
+                bool playerOrigin = disFact.OriginatingAgentId is null;
+                state.PendingFactionStimuli.Enqueue(new FactionStimulus
+                {
+                    FactionId    = deceiverFactionId.Value,
+                    StimulusType = "DeceptionExposed",
+                    Magnitude    = 0.3f,
+                    Description  = "Disinformation organically contradicted and superseded",
+                    PlayerIsOrigin = playerOrigin,
+                });
+
+                _emitter.Emit(new DeceptionExposed(
+                    state.Date, SimulationLod.Local,
+                    deceiverFactionId.Value, null),
+                    SimulationLod.Local);
+            }
+        }
+    }
 
     private static float LodToConfidence(SimulationLod lod) => lod switch
     {

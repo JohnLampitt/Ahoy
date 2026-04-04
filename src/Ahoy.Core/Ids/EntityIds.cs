@@ -41,3 +41,9 @@ public readonly record struct NavalDeploymentId(Guid Value)
     public static NavalDeploymentId New() => new(Guid.NewGuid());
     public override string ToString() => $"NavalDeployment:{Value:N}";
 }
+
+public readonly record struct OceanPoiId(Guid Value)
+{
+    public static OceanPoiId New() => new(Guid.NewGuid());
+    public override string ToString() => $"Poi:{Value:N}";
+}

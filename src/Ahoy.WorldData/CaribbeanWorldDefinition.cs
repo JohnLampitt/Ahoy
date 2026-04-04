@@ -39,6 +39,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         DefineWeather(state, regionIds);
         DefineIndividuals(state, portIds, factionIds);
         DefineShips(state, portIds, factionIds);
+        DefineOceanPois(state, regionIds);
 
         // Update player starting state
         state.Player.CaptainName = "Captain";
@@ -765,6 +766,31 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         state.Ships[id] = ship;
         if (state.Ports.TryGetValue(portId, out var port))
             port.DockedShips.Add(id);
+    }
+
+    // ================================================================
+    // OCEAN POIS
+    // ================================================================
+
+    private static void DefineOceanPois(WorldState state, RegionIds r)
+    {
+        void AddPoi(string name, RegionId region, Ahoy.Core.Enums.PoiType type,
+                    string desc, int lootGold = 0, float hazardSeverity = 0f)
+        {
+            var id = Ahoy.Core.Ids.OceanPoiId.New();
+            state.OceanPois[id] = new Ahoy.Simulation.State.OceanPoi
+            {
+                Id = id, Name = name, RegionId = region, Type = type,
+                Description = desc, LootGold = lootGold, HazardSeverity = hazardSeverity,
+            };
+        }
+
+        AddPoi("Santa Catalina Wreck",  r.Western,     Ahoy.Core.Enums.PoiType.Shipwreck,   "Spanish galleon lost in 1679", lootGold: 800);
+        AddPoi("El Dorado's Ghost",     r.SpanishMain, Ahoy.Core.Enums.PoiType.Shipwreck,   "Legendary hull half-submerged", lootGold: 1500);
+        AddPoi("Gulf Fortune",          r.Gulf,        Ahoy.Core.Enums.PoiType.Shipwreck,   "Small sloop, recent sinking",  lootGold: 300);
+        AddPoi("Dead Man's Reef",       r.Eastern,     Ahoy.Core.Enums.PoiType.ReefHazard,  "Notorious ship-killer",        hazardSeverity: 0.55f);
+        AddPoi("Mosquito Shoals",       r.Central,     Ahoy.Core.Enums.PoiType.ReefHazard,  "Shallow and treacherous",      hazardSeverity: 0.30f);
+        AddPoi("Tortuga Cache",         r.Western,     Ahoy.Core.Enums.PoiType.PirateCache, "Old Brotherhood stash",        lootGold: 600);
     }
 }
 

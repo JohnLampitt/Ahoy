@@ -12,7 +12,18 @@ public abstract record PlayerCommand;
 public record SetCourseCommand(ShipId ShipId, PortId DestinationPort) : PlayerCommand;
 public record AnchorCommand(ShipId ShipId) : PlayerCommand;
 
+/// <summary>Order the ship to sail toward an OceanPoi.</summary>
+public record SetCourseToPoi(ShipId ShipId, OceanPoiId PoiId) : PlayerCommand;
+
+/// <summary>Set a destination for all ships in the player's fleet simultaneously.</summary>
+public record SetFleetCourseCommand(PortId DestinationPort) : PlayerCommand;
+
 // ---- Trade ----
+
+/// <summary>Transfer cargo between two player fleet ships at the same port.</summary>
+public record TransferCargoCommand(
+    ShipId FromShip, ShipId ToShip,
+    Core.Enums.TradeGood Good, int Quantity) : PlayerCommand;
 
 public record BuyGoodCommand(
     ShipId ShipId, PortId PortId,
@@ -45,11 +56,13 @@ public record BurnAgentCommand(IndividualId AgentId) : PlayerCommand;
 
 // ---- Quests ----
 
+/// <summary>
+/// Plant a fabricated KnowledgeClaim into the world's knowledge network,
+/// attributed to the specified faction so suspicion falls on them.
+/// </summary>
 public record FabricateFactCommand(
-    IndividualId FakeIssuerId,
-    string TargetSubjectKey,
-    ContractConditionType Condition,
-    int ClaimedReward) : PlayerCommand;
+    KnowledgeClaim FabricatedClaim,
+    Core.Ids.FactionId AppearsToBeFromFaction) : PlayerCommand;
 
 public record ClaimContractRewardCommand(QuestInstanceId QuestInstanceId) : PlayerCommand;
 

@@ -38,6 +38,19 @@ public record PortProsperityChanged(
 
 // ---- Navigation / movement events ----
 
+/// <summary>Emitted when SetFleetCourseCommand causes docked fleet ships to depart together.</summary>
+public record FleetDeparted(
+    WorldDate Date, SimulationLod SourceLod,
+    IReadOnlyList<ShipId> Ships,
+    PortId From,
+    PortId Destination) : WorldEvent(Date, SourceLod);
+
+/// <summary>Emitted when all ships in a convoy dock at the destination port.</summary>
+public record FleetArrived(
+    WorldDate Date, SimulationLod SourceLod,
+    IReadOnlyList<ShipId> Ships,
+    PortId At) : WorldEvent(Date, SourceLod);
+
 public record ShipArrived(
     WorldDate Date, SimulationLod SourceLod,
     ShipId ShipId, PortId PortId) : WorldEvent(Date, SourceLod);
@@ -174,6 +187,33 @@ public record AgentReplaced(
     IndividualId OldAgentId,
     IndividualId NewAgentId,
     FactionId OwningFactionId) : WorldEvent(Date, SourceLod);
+
+// ---- POI events ----
+
+/// <summary>Emitted the first time a ship enters an undiscovered POI's location.</summary>
+public record PoiDiscovered(
+    WorldDate Date, SimulationLod SourceLod,
+    OceanPoiId PoiId, ShipId DiscoveredBy) : WorldEvent(Date, SourceLod);
+
+/// <summary>Emitted each time a ship interacts with a POI (loot found, damage taken, or nothing).</summary>
+public record PoiEncountered(
+    WorldDate Date, SimulationLod SourceLod,
+    OceanPoiId PoiId, ShipId ShipId,
+    int GoldFound, float HullDamage) : WorldEvent(Date, SourceLod);
+
+// ---- Intelligence / allegiance events ----
+
+/// <summary>
+/// Emitted when an infiltrator's actual allegiance is revealed to the player —
+/// via InvestigateLocalCommand, BurnAgentCommand, or death at local LOD.
+/// ActualFaction = Individual.FactionId (the real master).
+/// ClaimedFaction = Individual.ClaimedFactionId (the cover story now blown).
+/// </summary>
+public record AllegianceRevealed(
+    WorldDate Date, SimulationLod SourceLod,
+    IndividualId Individual,
+    FactionId ActualFaction,
+    FactionId ClaimedFaction) : WorldEvent(Date, SourceLod);
 
 // ---- Quest events ----
 
