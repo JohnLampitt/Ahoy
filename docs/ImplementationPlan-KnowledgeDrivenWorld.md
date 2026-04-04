@@ -69,18 +69,22 @@ This plan addresses the structural gaps that prevent a living, breathing world w
 
 **Goal:** NPCs consult their IndividualHolder (or their ship's ShipHolder) instead of ground truth when making decisions.
 
-#### 5A-1: Merchant Routing via IndividualHolder
+#### 5A-1: Merchant Routing via IndividualHolder + ShipHolder
 
 **File:** `src/Ahoy.Simulation/Systems/ShipMovementSystem.cs`
 
 Replace the current `AssignNpcRoute` random/ground-truth logic:
-1. Read `IndividualHolder(captain)` for non-superseded `PortPriceClaim` facts
-2. Score candidate ports by expected margin (known buy vs. known sell prices)
-3. If no useful price knowledge: fall back to `FactionHolder` facts
-4. If still nothing: fall back to `HomePortId`
-5. If captain holds conflicting `PortPriceClaim` facts for the same port, use the highest-confidence one
+1. Union facts from `IndividualHolder(captain)` and `ShipHolder(ship)` — crew gossip is the navigator's log
+2. Filter for non-superseded `PortPriceClaim` facts; select highest confidence per port
+3. Score candidate ports by expected margin (known buy vs. known sell prices)
+4. If no useful price knowledge: fall back to `FactionHolder` facts
+5. If still nothing: fall back to `HomePortId`
+
+Port geography (RegionId, adjacency, BaseTravelDays) is structural ground truth on `Region`/`Port` entities — captains know where ports are, they just don't know current prices. No `PortLocationClaim` needed.
 
 **Key constraint:** Captain must have been seeded with initial knowledge at world creation (`CaribbeanWorldDefinition`) or have docked at ports to accumulate facts. Without seeding, all merchants route home on tick 1.
+
+**Performance:** Direct KnowledgeStore lookups per NPC per tick. No caching layer — ~30-50 NPCs × ~100-200 facts is sub-millisecond on .NET 10. Revisit only if profiler shows > 2-3ms/tick.
 
 #### 5A-2: Governor Tour Decisions via Knowledge
 
@@ -106,34 +110,69 @@ Pass `KnowledgeStore` into decision evaluation so all NPC decision triggers can 
 **File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
 
 New method `ScanForNpcContractOpportunities(WorldState)`:
-- For each alive Individual with role in {PirateCaptain, NavalOfficer, Privateer}:
+- For each alive Individual with role in {PirateCaptain, NavalOfficer, Privateer, Informant}:
   - Read their `IndividualHolder` for `ContractClaim` facts with confidence > 0.40
   - Check supporting intel (same gate as player: separate fact about TargetSubjectKey)
-  - If conditions met: create `NpcContractPursuit` (new lightweight model, not a full QuestInstance)
+  - Informants eligible only for `TargetDead` contracts (assassination/sabotage, not naval combat)
+  - If conditions met: create `NpcContractPursuit` on `WorldState.NpcContractPursuits`
 
 #### 5B-2: NPC Contract Pursuit Model
 
 **File:** `src/Ahoy.Simulation/State/QuestModels.cs`
 
-```
-NpcContractPursuit:
-  IndividualId PursuerId
-  ContractClaim Contract
-  NpcPursuitStatus: Routing | Engaging | Abandoned
-  int ActivatedOnTick
+```csharp
+public sealed class NpcContractPursuit
+{
+    public required IndividualId PursuerId { get; init; }
+    public required ContractClaim Contract { get; init; }
+    public NpcPursuitStatus Status { get; set; }  // Routing | Engaging | Abandoned
+    public required int ActivatedOnTick { get; init; }
+}
 ```
 
-#### 5B-3: NPC Contract Resolution
+**File:** `src/Ahoy.Simulation/State/WorldState.cs`
+
+```csharp
+public Dictionary<IndividualId, NpcContractPursuit> NpcContractPursuits { get; } = new();
+```
+
+Lives on WorldState so ShipMovementSystem (system 2) can read pursuits when
+setting NPC routes, even though QuestSystem (system 8) creates them.
+
+#### 5B-3: ShipRoute Union Type
+
+**File:** `src/Ahoy.Simulation/State/Ship.cs`
+
+Replace `PortId? RoutingDestination` + `OceanPoiId? PoiDestination` with a
+discriminated union:
+
+```csharp
+public abstract record ShipRoute;
+public record PortRoute(PortId Destination) : ShipRoute;
+public record PursuitRoute(ShipId Target, RegionId LastKnownRegion) : ShipRoute;
+public record PoiRoute(OceanPoiId Poi) : ShipRoute;
+
+// On Ship:
+public ShipRoute? Route { get; set; }  // replaces RoutingDestination + PoiDestination
+```
+
+`PursuitRoute` navigates to `LastKnownRegion` and performs proximity check
+on arrival for interception. Standard port routing would miss targets at sea.
+
+#### 5B-4: NPC Contract Resolution
 
 **File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
 
 Each tick, for active `NpcContractPursuit`:
 - If pursuer's ship is in same region as target: attempt resolution (stat check)
+- Informant `TargetDead` resolution: abstracted stat-check gated by faction's
+  `IntelligenceCapability` on arrival at target's port. Failure emits `AgentBurned`.
 - If pursuer's intel confidence drops below 0.30: status -> Abandoned
-- If target destroyed/dead: emit `ContractFulfilled` event, pay NPC
+- If target destroyed/dead: emit `NpcClaimedContract` event, pay NPC
+- Player receives no compensation — "you were too slow" is intentional
 - Emit `NpcContractPursuitStarted` / `NpcContractAbandoned` as WorldEvents so the knowledge system can propagate "Captain X is hunting Ship Y" as gossip
 
-**Player interaction:** The player competes with NPCs for bounties. If an NPC fulfils a contract first, the player's quest expires. The player can also sell intel to NPCs to point them at targets (or misdirect them with bad intel).
+**Player interaction:** The player competes with NPCs for bounties. If an NPC fulfils a contract first, the player's quest expires with status `ClaimedByNpc`. The player can also sell intel to NPCs to point them at targets (or misdirect them with bad intel).
 
 ### Group 5C — Knowledge Conflict Resolution
 
@@ -157,9 +196,35 @@ When an NPC holds conflicting facts:
 - If `ConfidenceSpread < 0.15` (near-tied): NPC hesitates (delays action by 1-3 ticks)
 - Captains with conflicts about route safety may choose conservative routes
 
-#### 5C-3: Conflict-Triggered Quests
+#### 5C-3: KnowledgeConflictResolved Event
 
-New quest templates that trigger on `KnowledgeConflictDetected`:
+**File:** `src/Ahoy.Simulation/Events/WorldEvent.cs`
+
+```csharp
+public record KnowledgeConflictResolved(
+    WorldDate Date, SimulationLod SourceLod,
+    string SubjectKey,
+    KnowledgeFactId WinningFactId) : WorldEvent(Date, SourceLod);
+```
+
+Emitted when auto-resolve fires (ConfidenceSpread > 0.40) or when investigation
+supersedes one competing fact. Console and future UI use this to clean up
+conflict displays.
+
+#### 5C-4: Conflict-Triggered Quests
+
+Extend `QuestCondition` with:
+
+```csharp
+public record ConflictCondition(
+    Func<KnowledgeConflict, bool> Predicate,
+    string Description) : QuestCondition;
+```
+
+Queries `KnowledgeConflict` records directly — no synthetic "ConflictFact"
+polluting the KnowledgeStore.
+
+New quest templates that trigger on conflicts:
 - "Two captains disagree about the location of the Silver Fleet — who do you believe?"
 - "Your intelligence contradicts the governor's briefing — investigate or comply?"
 
@@ -182,6 +247,18 @@ QuestPhase:
 ```
 
 QuestTemplate gains `Phases: IReadOnlyList<QuestPhase>` (ordered). Existing flat templates map to a single phase (backward compatible).
+
+Quest instance gains `int CurrentPhaseIndex { get; set; }` to track progress.
+
+**Trigger fact pinning:** When a multi-phase quest activates, set
+`IsDecayExempt = true` on facts directly referenced as phase gate conditions.
+Revert on quest completion/failure/expiry. Only pin gate-critical facts, not
+every related fact — the captain's log records quest details, not every whisper.
+
+**NPC eligibility:** Add `bool IsNpcEligible` to `QuestTemplate` (default
+`false` for multi-phase, `true` for flat contracts). Autonomous phase navigation
+requires GOAP/HTN architecture; defer until RuleBasedDecisionProvider proves
+insufficient.
 
 #### 5D-2: Phase Advancement Logic
 
@@ -232,9 +309,24 @@ Currently only revealed on death. Add:
 
 **File:** `src/Ahoy.Simulation/Systems/FactionSystem.cs`
 
-Currently seeded at Secret sensitivity (0% propagation). Add a leak mechanic:
-- When a faction has low IntelligenceCapability (< 0.35), 2% chance per tick that an active Secret intention leaks to a random port as Restricted sensitivity
-- Creates an organic discovery path without requiring direct investigation
+Currently seeded at Secret sensitivity (0% propagation). Two leak mechanics:
+
+**Low-capability baseline (passive):** Factions with IntelligenceCapability < 0.35
+have a 2%/tick chance that an active Secret intention leaks to a random
+controlled port at Restricted sensitivity. Structurally leaky organisations.
+
+**High-capability stress leaks (event-driven):** All factions leak under
+systemic stress, regardless of capability:
+1. `TreasuryGold < ExpenditurePerTick * 5` → "can't pay their spies"
+2. `DeceptionExposed` event → "operational security compromised"
+3. `NavalStrength` drops > 50% in 10 ticks → "faction in disarray"
+
+Each trigger: 15%/tick chance (while condition persists) that one active Secret
+`FactionIntentionClaim` downgrades to Restricted in a random controlled port.
+
+**Player agency loop:** Player raids Spanish gold → treasury crisis → Spain's
+secret invasion plans leak to Havana taverns → player discovers and acts. This
+turns leaks into a mechanic the player can actively provoke.
 
 ---
 
@@ -248,10 +340,10 @@ Group 5E (claim circulation — makes 5A meaningful by giving NPCs facts to act 
   All items independent, parallel
   ↓
 Group 5B (NPC quest participation — needs 5A for NPC routing + 5E for claim flow)
-  5B-2 first (model), then 5B-1 + 5B-3
+  5B-2 + 5B-3 first (models), then 5B-1 + 5B-4
   ↓
 Group 5C (conflict resolution — benefits from all above being live)
-  5C-1 first (player-facing), then 5C-2, then 5C-3
+  5C-1 first (player-facing), then 5C-2, then 5C-3 + 5C-4
   ↓
 Group 5D (multi-phase quests — independent of 5B/5C but richer with them)
   5D-1 first (model), then 5D-2, then 5D-3
@@ -265,10 +357,14 @@ Groups 5C and 5D are independent of each other and can proceed in parallel once 
 
 1. **No system reads ground truth for NPC decisions after 5A.** All NPC behaviour flows from held facts. This is the single most important invariant.
 
-2. **NPC quest pursuit is lightweight.** `NpcContractPursuit` is not a full `QuestInstance` — it has no branches, no LLM dialogue, no player-facing UI. It's a routing directive with a resolution condition.
+2. **NPC quest pursuit is lightweight.** `NpcContractPursuit` is not a full `QuestInstance` — it has no branches, no LLM dialogue, no player-facing UI. It's a routing directive with a resolution condition. Lives on WorldState for cross-system visibility.
 
-3. **Phase graph is backward compatible.** Existing flat templates are single-phase quests. No migration needed.
+3. **ShipRoute union type replaces PortId? RoutingDestination.** `PortRoute`, `PursuitRoute`, `PoiRoute` — consolidates routing intent into a single discriminated union. `PursuitRoute` enables interception at sea.
 
-4. **Claim circulation changes are additive.** No existing claim types change semantics. New seeding paths are layered on.
+4. **Phase graph is backward compatible.** Existing flat templates are single-phase quests. No migration needed. `IsNpcEligible` defaults to `false` for multi-phase.
 
-5. **Tick ordering is preserved.** No new systems are added. All changes extend existing systems within their current tick slots.
+5. **Trigger fact pinning is scoped.** Only facts directly referenced as phase gate conditions are pinned. Secondary/ambient facts decay normally.
+
+6. **Claim circulation changes are additive.** No existing claim types change semantics. New seeding paths are layered on. High-cap faction leaks are event-driven (player agency), not RNG.
+
+7. **Tick ordering is preserved.** No new systems are added. All changes extend existing systems within their current tick slots. Ships route on T-1 knowledge — this is intentional (yesterday's intelligence).
