@@ -144,6 +144,9 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         state.Factions[spain].PatrolAllocations[r.Gulf] = 6;
         state.Factions[spain].PatrolAllocations[r.SpanishMain] = 5;
         state.Factions[spain].PatrolAllocations[r.Western] = 4;
+        // Pre-seed anti-piracy mandate so bounties generate from tick 1
+        state.Factions[spain].ActiveGoals.Add(new SuppressPiracy(r.Western) { Utility = 0.70f });
+        state.Factions[spain].ActiveGoals.Add(new SuppressPiracy(r.SpanishMain) { Utility = 0.70f });
 
         state.Factions[england] = new Faction
         {
@@ -157,6 +160,9 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         state.Factions[england].ClaimedRegions.AddRange([r.Eastern, r.Central]);
         state.Factions[england].PatrolAllocations[r.Eastern] = 5;
         state.Factions[england].PatrolAllocations[r.Central] = 3;
+        // Pre-seed anti-piracy mandate so bounties propagate into Nassau from tick 1
+        state.Factions[england].ActiveGoals.Add(new SuppressPiracy(r.Western) { Utility = 0.70f });
+        state.Factions[england].ActiveGoals.Add(new SuppressPiracy(r.Central) { Utility = 0.70f });
 
         state.Factions[france] = new Faction
         {
@@ -536,10 +542,10 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         AddGovernor(state, rng, "Meinheer",     "van Dyke", p.SantaCruz,  f.Netherlands, 62f);
         AddGovernor(state, rng, "Meinheer",     "de Groot", p.Willemstad, f.Netherlands, 58f);
 
-        // Pirate captains
-        AddPirate(state, rng, "Calico",      "Jack",    p.Tortuga,    f.BrethrensOfBlood);
-        AddPirate(state, rng, "Anne",        "Bonny",   p.Cayos,      f.BrethrensOfBlood);
-        AddPirate(state, rng, "Bartholomew", "Roberts", p.Cartagena,  f.SilverCoast);
+        // Pirate captains — each gets a ship so SuppressPiracy goals can generate bounties
+        AddPirate(state, rng, "Calico",      "Jack",    p.Tortuga,    f.BrethrensOfBlood, "Ranger",       ShipClass.Sloop);
+        AddPirate(state, rng, "Anne",        "Bonny",   p.Cayos,      f.BrethrensOfBlood, "Revenge",      ShipClass.Brigantine);
+        AddPirate(state, rng, "Bartholomew", "Roberts", p.Tortuga,    f.SilverCoast,      "Fortune",      ShipClass.Brig);
 
         // Knowledge brokers (factionId = sponsoring faction for gold pool; null = independent)
         AddBroker(state, rng, "Pedro",   "Ruiz",    p.Nassau,     null);
@@ -582,18 +588,41 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
     }
 
     private static void AddPirate(WorldState state, Random rng,
-        string first, string last, PortId portId, FactionId factionId)
+        string first, string last, PortId portId, FactionId factionId,
+        string? shipName = null, ShipClass shipClass = ShipClass.Sloop)
     {
-        var id = IndividualId.New();
-        state.Individuals[id] = new Individual
+        var captainId = IndividualId.New();
+        var captain = new Individual
         {
-            Id = id, FirstName = first, LastName = last,
+            Id = captainId, FirstName = first, LastName = last,
             Role = IndividualRole.PirateCaptain,
             FactionId = factionId,
             LocationPortId = portId,
+            HomePortId = portId,
             Authority = 40f,
             Personality = PersonalityTraits.Random(rng),
         };
+        captain.CurrentGold = 200 + rng.Next(0, 150);
+        state.Individuals[captainId] = captain;
+
+        if (shipName is null) return;
+
+        var shipId = ShipId.New();
+        var ship = new Ship
+        {
+            Id = shipId, Name = shipName, Class = shipClass,
+            Location = new AtPort(portId),
+            MaxCargoTons = 80, MaxCrew = 60, Guns = 12,
+            CurrentCrew = 50,
+            GoldOnBoard = 400,
+            OwnerFactionId = factionId,
+            IsPirate = true,
+            CaptainId = captainId,
+        };
+        state.Ships[shipId] = ship;
+        if (state.Ports.TryGetValue(portId, out var port))
+            port.DockedShips.Add(shipId);
+        ship.Cargo[TradeGood.Rum] = 15;
     }
 
     private static void AddBroker(WorldState state, Random rng,

@@ -378,10 +378,9 @@ public sealed class FactionSystem : IWorldSystem
         {
             var targetRegionId = goal.TargetRegion;
 
-            // Find pirate ships at sea in the target region
+            // Find pirate ships in the target region (at sea OR docked at a pirate haven)
             var pirateShips = state.Ships.Values
-                .Where(s => s.IsPirate
-                    && s.Location is AtSea ats && ats.Region == targetRegionId)
+                .Where(s => s.IsPirate && ShipInRegion(s, targetRegionId, state))
                 .ToList();
 
             foreach (var pirateShip in pirateShips)
@@ -402,7 +401,8 @@ public sealed class FactionSystem : IWorldSystem
                 var seedPorts = GetSeedPorts(faction, targetRegionId, state);
                 SeedContractInPorts(seedPorts, governor.Id, factionId, shipSubjectKey,
                     ContractConditionType.TargetDestroyed, bounty,
-                    NarrativeArchetype.ColonialCommission, state, context.TickNumber);
+                    NarrativeArchetype.ColonialCommission, state, context.TickNumber,
+                    targetShip: pirateShip);
             }
         }
 
@@ -432,6 +432,15 @@ public sealed class FactionSystem : IWorldSystem
         }
     }
 
+    private static bool ShipInRegion(Ship ship, RegionId regionId, WorldState state)
+        => ship.Location switch
+        {
+            AtSea ats   => ats.Region == regionId,
+            EnRoute er  => er.From == regionId || er.To == regionId,
+            AtPort atp  => state.Ports.TryGetValue(atp.Port, out var p) && p.RegionId == regionId,
+            _           => false,
+        };
+
     private static List<PortId> GetSeedPorts(Faction faction, RegionId targetRegionId,
         WorldState state)
     {
@@ -457,7 +466,8 @@ public sealed class FactionSystem : IWorldSystem
         int goldReward,
         NarrativeArchetype archetype,
         WorldState state,
-        int tickNumber)
+        int tickNumber,
+        Ship? targetShip = null)
     {
         var claim = new ContractClaim(
             issuerId, issuerFactionId, targetSubjectKey,
@@ -468,7 +478,7 @@ public sealed class FactionSystem : IWorldSystem
             var fact = new KnowledgeFact
             {
                 Claim          = claim,
-                Sensitivity    = KnowledgeSensitivity.Restricted,
+                Sensitivity    = KnowledgeSensitivity.Public,  // bounties spread freely
                 Confidence     = 0.80f,
                 BaseConfidence = 0.80f,
                 ObservedDate   = state.Date,
@@ -476,6 +486,32 @@ public sealed class FactionSystem : IWorldSystem
                 SourceHolder   = new FactionHolder(issuerFactionId),
             };
             state.Knowledge.AddFact(new PortHolder(portId), fact);
+
+            // Co-seed last-known-location intel so the quest intel gate can be satisfied.
+            // A bounty notice naturally includes the sighting that prompted it.
+            if (targetShip is not null && condition == ContractConditionType.TargetDestroyed)
+            {
+                var locFact = new KnowledgeFact
+                {
+                    Claim          = new ShipLocationClaim(targetShip.Id, targetShip.Location),
+                    Sensitivity    = KnowledgeSensitivity.Public,
+                    Confidence     = 0.70f,
+                    BaseConfidence = 0.70f,
+                    ObservedDate   = state.Date,
+                    HopCount       = 1,
+                    SourceHolder   = new FactionHolder(issuerFactionId),
+                };
+                var portHolder = new PortHolder(portId);
+                var subjectKey = KnowledgeFact.GetSubjectKey(locFact.Claim);
+                var existing = state.Knowledge.GetFacts(portHolder)
+                    .FirstOrDefault(f => !f.IsSuperseded && KnowledgeFact.GetSubjectKey(f.Claim) == subjectKey);
+                if (existing is null || existing.Confidence < 0.70f)
+                {
+                    if (existing is not null)
+                        state.Knowledge.MarkSuperseded(portHolder, locFact, tickNumber);
+                    state.Knowledge.AddFact(portHolder, locFact);
+                }
+            }
         }
     }
 

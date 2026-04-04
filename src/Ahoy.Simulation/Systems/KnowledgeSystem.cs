@@ -64,8 +64,11 @@ public sealed class KnowledgeSystem : IWorldSystem
         // 2b. Brokers passively absorb high-confidence port facts
         SkimBrokerFacts(state, tick);
 
-        // 3. Generate first-hand observations when the player ship arrives at a port
+        // 3a. Generate first-hand observations when the player ship arrives at a port
         GeneratePlayerObservations(state, tick);
+
+        // 3b. Passive gossip: player absorbs port facts while docked (even without arriving this tick)
+        AbsorbPortGossip(state, tick);
 
         // 4. Degrade confidence on all existing facts
         DegradeConfidence(state);
@@ -389,6 +392,52 @@ public sealed class KnowledgeSystem : IWorldSystem
     /// Any existing player facts that are superseded by these observations feed back
     /// into source reputation tracking.
     /// </summary>
+    /// <summary>
+    /// While the player is docked, they passively hear tavern gossip.
+    /// Each tick, each Public fact in the port's knowledge pool has a 20% chance
+    /// of reaching the player. This fires even when ArrivedThisTick is false,
+    /// ensuring the player learns about ContractClaims seeded after they arrived.
+    /// </summary>
+    private void AbsorbPortGossip(WorldState state, int tick)
+    {
+        var playerShip = state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
+        if (playerShip?.Location is not AtPort atPort) return;
+
+        var portHolder = new PortHolder(atPort.Port);
+        var playerHolder = new PlayerHolder();
+        var playerFacts = state.Knowledge.GetFacts(playerHolder);
+
+        foreach (var fact in state.Knowledge.GetFacts(portHolder))
+        {
+            if (fact.IsSuperseded || fact.Sensitivity == KnowledgeSensitivity.Secret) continue;
+            var propChance = PropagationChanceFor(fact.Sensitivity) * 0.65f; // 65% of normal rate
+            if (_rng.NextDouble() > propChance) continue;
+
+            var subjectKey = KnowledgeFact.GetSubjectKey(fact.Claim);
+            var existing = playerFacts.FirstOrDefault(f =>
+                !f.IsSuperseded && KnowledgeFact.GetSubjectKey(f.Claim) == subjectKey);
+            // Only absorb if player doesn't know this at equal or better confidence
+            if (existing != null && existing.Confidence >= fact.Confidence) continue;
+
+            var reliability = state.Knowledge.GetSourceReliability(portHolder);
+            var gossip = new KnowledgeFact
+            {
+                Claim = fact.Claim,
+                Sensitivity = fact.Sensitivity,
+                Confidence = fact.Confidence * (1f - HopPenaltyFraction) * reliability,
+                BaseConfidence = fact.Confidence * (1f - HopPenaltyFraction) * reliability,
+                ObservedDate = fact.ObservedDate,
+                IsDisinformation = fact.IsDisinformation,
+                HopCount = fact.HopCount + 1,
+                SourceHolder = portHolder,
+                OriginatingAgentId = fact.OriginatingAgentId,
+            };
+            if (existing != null)
+                state.Knowledge.MarkSuperseded(playerHolder, gossip, tick);
+            state.Knowledge.AddFact(playerHolder, gossip);
+        }
+    }
+
     private static void GeneratePlayerObservations(WorldState state, int tick)
     {
         var playerShip = state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
