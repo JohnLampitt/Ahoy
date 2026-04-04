@@ -160,6 +160,7 @@ public sealed class FactionSystem : IWorldSystem
         // Adopt high-utility new goals if room
         if (faction.ActiveGoals.Count < MaxActiveGoals)
         {
+            var hadEspionage = faction.ActiveGoals.Any(g => g is EspionageGoal);
             var candidates = GenerateCandidateGoals(faction, factionId, state);
             foreach (var candidate in candidates)
             {
@@ -169,6 +170,10 @@ public sealed class FactionSystem : IWorldSystem
                 {
                     faction.ActiveGoals.Add(candidate);
                     SeedIntentionFact(candidate, factionId, state, context.TickNumber);
+
+                    // Newly adopted EspionageGoal → seed infiltrators into rival factions
+                    if (!hadEspionage && candidate is EspionageGoal)
+                        SeedInfiltratorsForEspionage(factionId, state);
                 }
             }
         }
@@ -521,6 +526,34 @@ public sealed class FactionSystem : IWorldSystem
             faction.IntelligenceCapability = Math.Clamp(faction.IntelligenceCapability + 0.005f, 0.10f, 0.95f);
     }
 
+    /// <summary>
+    /// Called when a faction newly adopts EspionageGoal.
+    /// Marks ~5% of the faction's living non-governor members as infiltrators for a random rival.
+    /// FactionId = actual master (the rival); ClaimedFactionId = cover identity (the hiring faction).
+    /// </summary>
+    private void SeedInfiltratorsForEspionage(FactionId factionId, WorldState state)
+    {
+        var rivals = state.Factions.Values
+            .Where(f => f.Type == FactionType.Colonial && f.Id != factionId)
+            .ToList();
+        if (rivals.Count == 0) return;
+
+        var members = state.Individuals.Values
+            .Where(i => i.IsAlive && i.FactionId == factionId
+                        && i.Role != IndividualRole.Governor)
+            .ToList();
+
+        foreach (var member in members)
+        {
+            if (_rng.NextSingle() < 0.05f)
+            {
+                // Flip allegiance: FactionId becomes the rival (truth), ClaimedFactionId becomes the old faction (cover)
+                member.ClaimedFactionId = member.FactionId;
+                member.FactionId        = rivals[_rng.Next(rivals.Count)].Id;
+            }
+        }
+    }
+
     private void TickBurnReplacements(WorldState state, SimulationContext context, IEventEmitter events)
     {
         // Start timers for any newly-compromised individuals not yet tracked
@@ -559,6 +592,23 @@ public sealed class FactionSystem : IWorldSystem
                 HomePortId = burned.HomePortId,
             };
             replacement.IsAlive = true;
+
+            // 10% chance: replacement is secretly loyal to a rival colonial power
+            if (_rng.NextSingle() < 0.10f
+                && faction.ActiveGoals.Any(g => g is EspionageGoal)
+                && faction.Type == FactionType.Colonial)
+            {
+                var rivals = state.Factions.Values
+                    .Where(f => f.Type == FactionType.Colonial && f.Id != burned.FactionId)
+                    .ToList();
+                if (rivals.Count > 0)
+                {
+                    // FactionId stays as their actual master; ClaimedFactionId is the cover identity
+                    replacement.ClaimedFactionId = replacement.FactionId;   // cover: appears loyal to hiring faction
+                    replacement.FactionId        = rivals[_rng.Next(rivals.Count)].Id;  // truth: serves the rival
+                }
+            }
+
             state.Individuals[replacement.Id] = replacement;
 
             burned.IsAlive = false;
@@ -602,6 +652,12 @@ public sealed class FactionSystem : IWorldSystem
                 case "DeceptionExposed":
                     faction.IntelligenceCapability = Math.Clamp(
                         faction.IntelligenceCapability - 0.05f, 0.10f, 0.95f);
+                    if (s.PlayerIsOrigin)
+                    {
+                        faction.TreasuryGold = Math.Max(0, faction.TreasuryGold - 200);
+                        if (!faction.ActiveGoals.Any(g => g is EspionageGoal))
+                            faction.ActiveGoals.Add(new EspionageGoal { Utility = 0.80f });
+                    }
                     break;
             }
         }

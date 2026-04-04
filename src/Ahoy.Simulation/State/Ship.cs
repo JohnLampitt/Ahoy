@@ -46,6 +46,23 @@ public sealed class Ship
     /// </summary>
     public int TicksDockedAtCurrentPort { get; set; }
 
+    /// <summary>If set, the ship is routing to this POI instead of a port.</summary>
+    public OceanPoiId? PoiDestination { get; set; }
+
+    /// <summary>
+    /// Non-null when this ship is part of an active convoy.
+    /// All ships sharing a ConvoyId cap their travel speed to the convoy minimum.
+    /// Cleared when all convoy members dock at the destination.
+    /// </summary>
+    public Guid? ConvoyId { get; set; }
+
+    /// <summary>
+    /// Non-null when the ship flies false colours.
+    /// OwnerFactionId is always the actual owning faction (ground truth).
+    /// ClaimedOwnerFactionId is what flag the ship flies — what others see.
+    /// </summary>
+    public FactionId? ClaimedOwnerFactionId { get; set; }
+
     // --- Flags ---
     public bool IsPlayerShip { get; init; }
     public bool IsPirate { get; set; }

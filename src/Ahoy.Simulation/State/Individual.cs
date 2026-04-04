@@ -40,6 +40,19 @@ public sealed class Individual
     public bool IsPlayerKnown { get; set; }
     public bool IsCompromised { get; set; }
 
+    // --- Hidden loyalty ---
+    /// <summary>
+    /// The faction this individual publicly claims to serve.
+    /// Null = no deception; their FactionId is their public identity.
+    /// Non-null + different from FactionId = infiltrator.
+    /// FactionId is always the ground truth (real allegiance).
+    /// ClaimedFactionId is the cover story visible to others.
+    /// </summary>
+    public FactionId? ClaimedFactionId { get; set; }
+
+    /// <summary>True when ClaimedFactionId is set and differs from FactionId.</summary>
+    public bool IsInfiltrator => ClaimedFactionId.HasValue && ClaimedFactionId != FactionId;
+
     // --- Wealth ---
     public int CurrentGold { get; set; }
 }

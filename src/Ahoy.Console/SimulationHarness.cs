@@ -85,8 +85,13 @@ public sealed class SimulationHarness
                     PrintQuests();
                     break;
 
-                // 'choose' is no longer supported — contracts are resolved mechanically
+                case "pois":
+                    PrintPois();
+                    break;
 
+                case "fleet":
+                    PrintFleet();
+                    break;
 
                 case "help":
                     PrintHelp();
@@ -182,6 +187,15 @@ public sealed class SimulationHarness
                 ContractFulfilled cf       => $"💰 Contract paid: {cf.GoldPaid}g for {cf.TargetSubjectKey}",
                 KnowledgeConflictDetected kcd => $"⚠  Knowledge conflict: {kcd.SubjectKey}",
                 DeceptionExposed de        => $"🔍 Deception exposed (faction: {FactionName(de.DeceivingFactionId)})",
+                PoiDiscovered pd           => $"🗺  POI discovered: {PoiName(pd.PoiId)} (by {ShipName(pd.DiscoveredBy)})",
+                PoiEncountered pe          => pe.GoldFound > 0
+                    ? $"💎 POI loot: {pe.GoldFound}g from {PoiName(pe.PoiId)}"
+                    : pe.HullDamage > 0
+                        ? $"💥 POI hazard at {PoiName(pe.PoiId)}: -{pe.HullDamage:P0} hull"
+                        : $"⚓ POI visited: {PoiName(pe.PoiId)}",
+                FleetDeparted fd           => $"⚓ Fleet departed {PortName(fd.From)} → {PortName(fd.Destination)} ({fd.Ships.Count} ships)",
+                FleetArrived fa            => $"⚓ Fleet arrived at {PortName(fa.At)} ({fa.Ships.Count} ships)",
+                AllegianceRevealed ar      => $"🕵 Allegiance revealed: {IndividualName(ar.Individual)} was {FactionName(ar.ClaimedFaction)} → actually serves {FactionName(ar.ActualFaction)}",
                 _                          => null,   // suppress other noise
             };
 
@@ -190,6 +204,9 @@ public sealed class SimulationHarness
             System.Console.WriteLine($"{prefix}{desc}");
         }
     }
+
+    private string PoiName(Ahoy.Core.Ids.OceanPoiId id) =>
+        _engine.State.OceanPois.TryGetValue(id, out var poi) ? poi.Name : id.ToString();
 
     private string PortName(Ahoy.Core.Ids.PortId id) =>
         _engine.State.Ports.TryGetValue(id, out var p) ? p.Name : id.ToString();
@@ -326,6 +343,8 @@ public sealed class SimulationHarness
             System.Console.WriteLine();
             System.Console.WriteLine($"  [{i}] {target}  ({q.Id})");
             System.Console.WriteLine($"     Condition : {q.Contract.Condition}");
+            if (q.Contract.Condition == ContractConditionType.GoodsDelivered)
+                System.Console.WriteLine($"     Deliver   : 20t Food → {q.Contract.TargetSubjectKey}");
             System.Console.WriteLine($"     Reward    : {reward}g");
             System.Console.WriteLine($"     Status    : {status}");
             System.Console.WriteLine($"     Activated : {q.ActivatedDate}");
@@ -348,7 +367,24 @@ public sealed class SimulationHarness
             var claim = fact.Claim.GetType().Name.Replace("Claim", "");
             var corr = fact.CorroborationCount > 0 ? $"  corr:{fact.CorroborationCount}" : "";
             var src = FormatSourceHolder(fact.SourceHolder);
-            System.Console.WriteLine($"  {conf,7}  {claim,-22}  {age}  hops:{fact.HopCount}{corr}  src:{src}");
+            var infiltratorNote = fact.Claim is Ahoy.Simulation.State.IndividualAllegianceClaim iac && iac.ActualFaction.HasValue
+                ? $"  [claims:{FactionName(iac.ClaimedFaction)} actual:{FactionName(iac.ActualFaction.Value)}]" : "";
+            System.Console.WriteLine($"  {conf,7}  {claim,-22}  {age}  hops:{fact.HopCount}{corr}  src:{src}{infiltratorNote}");
+        }
+
+        var disinfoFacts = facts.Where(f => f.IsDisinformation && !f.IsSuperseded).ToList();
+        if (disinfoFacts.Count > 0)
+        {
+            System.Console.WriteLine();
+            System.Console.WriteLine($"  [DISINFORMATION in player knowledge: {disinfoFacts.Count}]");
+            foreach (var df in disinfoFacts.OrderByDescending(f => f.Confidence))
+            {
+                var dConf  = $"[{df.Confidence:P0}]";
+                var dClaim = df.Claim.GetType().Name.Replace("Claim", "");
+                var dSrc   = FormatSourceHolder(df.SourceHolder);
+                var dSubKey = Ahoy.Simulation.State.KnowledgeFact.GetSubjectKey(df.Claim);
+                System.Console.WriteLine($"    {dConf,7}  {dClaim,-22}  key:{dSubKey}  src:{dSrc}");
+            }
         }
 
         var player = new Ahoy.Simulation.State.PlayerHolder();
@@ -371,6 +407,65 @@ public sealed class SimulationHarness
         }
     }
 
+    private void PrintPois()
+    {
+        var s = _engine.State;
+        var playerFacts = s.Knowledge.GetFacts(new Ahoy.Simulation.State.PlayerHolder());
+        var knownPois = playerFacts
+            .Where(f => !f.IsSuperseded && f.Claim is Ahoy.Simulation.State.OceanPoiClaim)
+            .Select(f => (Fact: f, Claim: (Ahoy.Simulation.State.OceanPoiClaim)f.Claim))
+            .ToList();
+
+        System.Console.WriteLine();
+        if (knownPois.Count == 0)
+        {
+            System.Console.WriteLine("  No POIs in player knowledge.");
+            return;
+        }
+        System.Console.WriteLine($"  Known POIs: {knownPois.Count}");
+        System.Console.WriteLine($"  {"Name",-26} {"Type",-14} {"Region",-18} {"Cache",-18} {"Conf"}");
+        System.Console.WriteLine($"  {new string('-', 82)}");
+        foreach (var (fact, claim) in knownPois)
+        {
+            var poiName = s.OceanPois.TryGetValue(claim.Poi, out var poi) ? poi.Name : claim.Poi.ToString();
+            var regionName = s.Regions.TryGetValue(claim.Region, out var reg) ? reg.Name : "?";
+            var cacheStr = claim.Type is Ahoy.Core.Enums.PoiType.Shipwreck
+                                      or Ahoy.Core.Enums.PoiType.PirateCache
+                ? claim.CacheStatus.ToString()
+                : "—";
+            System.Console.WriteLine(
+                $"  {poiName,-26} {claim.Type,-14} {regionName,-18} {cacheStr,-18} {fact.Confidence:P0}");
+        }
+    }
+
+    private void PrintFleet()
+    {
+        var s = _engine.State;
+        System.Console.WriteLine();
+        System.Console.WriteLine($"  Fleet ({s.Player.FleetIds.Count} ships)  — Gold: {s.Player.PersonalGold:N0}g");
+        System.Console.WriteLine($"  {"Ship",-22} {"Class",-14} {"Hull",5} {"Location",-28} {"Cargo"}");
+        System.Console.WriteLine($"  {new string('-', 85)}");
+
+        foreach (var shipId in s.Player.FleetIds)
+        {
+            if (!s.Ships.TryGetValue(shipId, out var ship)) continue;
+            var flag = ship.IsPlayerShip ? "★ " : "  ";
+            var hull = $"{ship.HullIntegrity:P0}";
+            var loc = ship.Location switch
+            {
+                AtPort ap when s.Ports.TryGetValue(ap.Port, out var p) => $"@ {p.Name}",
+                AtSea aas when s.Regions.TryGetValue(aas.Region, out var r) => $"~ {r.Name}",
+                EnRoute er => $"→ {s.Regions.GetValueOrDefault(er.To)?.Name ?? "?"}  ({er.Progress:P0})",
+                Ahoy.Simulation.State.AtPoi atPoi when s.OceanPois.TryGetValue(atPoi.Poi, out var p2) => $"[POI] {p2.Name}",
+                _ => "unknown",
+            };
+            var cargo = ship.Cargo.Count == 0 ? "empty"
+                : string.Join(", ", ship.Cargo.Select(kv => $"{kv.Value}t {kv.Key}"));
+            var convoy = ship.ConvoyId.HasValue ? " [convoy]" : "";
+            System.Console.WriteLine($"{flag}{ship.Name,-22} {ship.Class,-14} {hull,5} {loc,-28} {cargo}{convoy}");
+        }
+    }
+
     private static void PrintHelp()
     {
         System.Console.WriteLine();
@@ -384,6 +479,8 @@ public sealed class SimulationHarness
         System.Console.WriteLine("    weather       — weather by region");
         System.Console.WriteLine("    knowledge     — player's current knowledge facts");
         System.Console.WriteLine("    quests        — active contract quests");
+        System.Console.WriteLine("    pois          — known ocean points of interest");
+        System.Console.WriteLine("    fleet         — player fleet status");
         System.Console.WriteLine("    help          — this message");
         System.Console.WriteLine("    quit          — exit");
     }

@@ -64,6 +64,10 @@ public sealed class ShipMovementSystem : IWorldSystem
                     if (!ship.IsPlayerShip)
                         AssignNpcRoute(ship, atSea.Region, state);
                     break;
+
+                case AtPoi atPoi:
+                    ExplorePoiTick(ship, atPoi, state, events, lod);
+                    break;
             }
         }
     }
@@ -71,12 +75,39 @@ public sealed class ShipMovementSystem : IWorldSystem
     private void TryDepartPort(Ship ship, AtPort atPort, WorldState state,
         IEventEmitter events, SimulationLod lod)
     {
-        // Player ship — only departs via PlayerCommand
-        if (ship.IsPlayerShip) return;
-
         // Track how long this ship has been docked
-        if (!ship.IsPlayerShip)
-            ship.TicksDockedAtCurrentPort++;
+        ship.TicksDockedAtCurrentPort++;
+
+        // POI routing: depart toward a POI destination if set (player or NPC)
+        if (ship.PoiDestination.HasValue
+            && state.OceanPois.TryGetValue(ship.PoiDestination.Value, out var poiDest)
+            && state.Ports.TryGetValue(atPort.Port, out var departingPortForPoi))
+        {
+            var poiRegion = poiDest.RegionId;
+            if (departingPortForPoi.RegionId == poiRegion)
+            {
+                // Already in the POI's region — go directly to AtPoi
+                events.Emit(new ShipDeparted(state.Date, lod, ship.Id, atPort.Port), lod);
+                ship.Location = new AtPoi(ship.PoiDestination.Value, poiRegion);
+            }
+            else
+            {
+                var nextRegion = FindNextRegion(departingPortForPoi.RegionId, poiRegion, state);
+                if (nextRegion.HasValue)
+                {
+                    var travelDays = ship.ConvoyId.HasValue
+                        ? CalculateConvoyTravelDays(ship.ConvoyId.Value,
+                            departingPortForPoi.RegionId, nextRegion.Value, state)
+                        : GetTravelDays(departingPortForPoi.RegionId, nextRegion.Value, state);
+                    ship.Location = new EnRoute(departingPortForPoi.RegionId, nextRegion.Value, 0f, travelDays);
+                    events.Emit(new ShipDeparted(state.Date, lod, ship.Id, atPort.Port), lod);
+                }
+            }
+            return;
+        }
+
+        // Player ship — only departs via PlayerCommand (for port routing)
+        if (ship.IsPlayerShip) return;
 
         // NPC ship at port with no destination — pick one if agent has knowledge or has waited long enough
         if (!ship.RoutingDestination.HasValue &&
@@ -101,7 +132,9 @@ public sealed class ShipMovementSystem : IWorldSystem
                 var nextRegion = FindNextRegion(fromRegion, destRegion, state);
                 if (nextRegion.HasValue)
                 {
-                    var travelDays = GetTravelDays(fromRegion, nextRegion.Value, state);
+                    var travelDays = ship.ConvoyId.HasValue
+                        ? CalculateConvoyTravelDays(ship.ConvoyId.Value, fromRegion, nextRegion.Value, state)
+                        : GetTravelDays(fromRegion, nextRegion.Value, state);
                     ship.Location = new EnRoute(fromRegion, nextRegion.Value, 0f, travelDays);
                     events.Emit(new ShipDeparted(state.Date, lod, ship.Id, atPort.Port), lod);
                 }
@@ -142,6 +175,17 @@ public sealed class ShipMovementSystem : IWorldSystem
     private void ArriveInRegion(Ship ship, RegionId regionId, WorldState state,
         IEventEmitter events, SimulationLod lod)
     {
+        // Check if ship has a POI destination in this region — divert to AtPoi
+        if (ship.PoiDestination.HasValue
+            && state.OceanPois.TryGetValue(ship.PoiDestination.Value, out var arrivingPoi)
+            && arrivingPoi.RegionId == regionId)
+        {
+            ship.Location = new AtPoi(ship.PoiDestination.Value, regionId);
+            ship.RouteProgressAccumulator = 0;
+            events.Emit(new ShipEnteredRegion(state.Date, lod, ship.Id, regionId), lod);
+            return;
+        }
+
         // Check if ship's routing destination is a port in this region
         if (ship.RoutingDestination.HasValue &&
             state.Ports.TryGetValue(ship.RoutingDestination.Value, out var destPort) &&
@@ -160,6 +204,24 @@ public sealed class ShipMovementSystem : IWorldSystem
                 port.DockedShips.Add(ship.Id);
 
             events.Emit(new ShipArrived(state.Date, lod, ship.Id, portId), lod);
+
+            // Check if all living convoy members are now docked → emit FleetArrived and clear convoy
+            if (ship.ConvoyId.HasValue)
+            {
+                var convoyId = ship.ConvoyId.Value;
+                var convoyMembers = state.Ships.Values
+                    .Where(s => s.ConvoyId == convoyId)
+                    .ToList();
+
+                var allDocked = convoyMembers.All(s => s.Location is AtPort ap2 && ap2.Port == portId);
+                if (allDocked)
+                {
+                    var memberIds = convoyMembers.Select(s => s.Id).ToList();
+                    events.Emit(new FleetArrived(state.Date, lod, memberIds, portId), lod);
+                    foreach (var m in convoyMembers)
+                        m.ConvoyId = null;
+                }
+            }
         }
         else
         {
@@ -168,6 +230,106 @@ public sealed class ShipMovementSystem : IWorldSystem
             ship.RouteProgressAccumulator = 0;
             events.Emit(new ShipEnteredRegion(state.Date, lod, ship.Id, regionId), lod);
         }
+    }
+
+    private void ExplorePoiTick(Ship ship, AtPoi atPoi, WorldState state,
+        IEventEmitter events, SimulationLod lod)
+    {
+        if (!state.OceanPois.TryGetValue(atPoi.Poi, out var poi))
+        {
+            ship.Location = new AtSea(atPoi.Region);
+            ship.PoiDestination = null;
+            return;
+        }
+
+        // Discovery
+        if (!poi.IsDiscovered)
+        {
+            poi.IsDiscovered = true;
+            events.Emit(new PoiDiscovered(state.Date, lod, poi.Id, ship.Id), lod);
+        }
+
+        // Outcome resolution
+        int goldFound = 0;
+        float hullDamage = 0f;
+
+        switch (poi.Type)
+        {
+            case PoiType.Shipwreck:
+            case PoiType.PirateCache:
+                if (poi.LootGold > 0 && _rng.NextSingle() < 0.70f)
+                {
+                    goldFound = Math.Min(poi.LootGold, 100 + _rng.Next(poi.LootGold / 2 + 1));
+                    poi.LootGold = Math.Max(0, poi.LootGold - goldFound);
+                    if (ship.IsPlayerShip)
+                        state.Player.PersonalGold += goldFound;
+                    else if (ship.CaptainId.HasValue
+                        && state.Individuals.TryGetValue(ship.CaptainId.Value, out var cap))
+                        cap.CurrentGold += goldFound;
+                }
+                break;
+
+            case PoiType.ReefHazard:
+            case PoiType.StormEye:
+                hullDamage = poi.HazardSeverity * (_rng.NextSingle() * 0.05f + 0.15f);
+                ship.HullIntegrity = Math.Max(0f, ship.HullIntegrity - hullDamage);
+
+                if (ship.HullIntegrity <= 0f)
+                {
+                    events.Emit(new PoiEncountered(state.Date, lod, poi.Id, ship.Id, 0, hullDamage), lod);
+                    events.Emit(new ShipDestroyed(state.Date, lod, ship.Id, null), lod);
+                    state.Player.FleetIds.Remove(ship.Id);
+                    state.Ships.Remove(ship.Id);
+                    return;   // ship is gone — do NOT transition to AtSea
+                }
+                break;
+
+            case PoiType.RendezvousPoint:
+                // No mechanical outcome; narrative only
+                break;
+        }
+
+        events.Emit(new PoiEncountered(state.Date, lod, poi.Id, ship.Id, goldFound, hullDamage), lod);
+
+        // Leave POI
+        ship.Location = new AtSea(atPoi.Region);
+        ship.PoiDestination = null;
+    }
+
+    /// <summary>
+    /// Finds the slowest effective travel time across all ships in a convoy for the given leg.
+    /// Ships in a convoy travel at the speed of the slowest member so they arrive together.
+    /// </summary>
+    private float CalculateConvoyTravelDays(
+        Guid convoyId, RegionId fromRegion, RegionId toRegion, WorldState state)
+    {
+        var baseDays = GetTravelDays(fromRegion, toRegion, state);
+        var slowestDays = baseDays;
+
+        foreach (var ship in state.Ships.Values)
+        {
+            if (ship.ConvoyId != convoyId) continue;
+            if (ship.Location is not AtPort) continue;
+
+            var weather = state.Weather.TryGetValue(fromRegion, out var w) ? w : null;
+            var windMod = weather is not null
+                ? GetWindModifier(weather.WindDirection, fromRegion, toRegion, state)
+                : 1.0f;
+            var stormMod = weather?.StormPresence switch
+            {
+                StormPresence.Active       => 0.40f,
+                StormPresence.Approaching  => 0.75f,
+                StormPresence.Dissipating  => 0.85f,
+                _                          => 1.0f,
+            };
+            var effectiveSpeed = windMod * stormMod;
+            if (effectiveSpeed > 0f)
+            {
+                var shipDays = baseDays / effectiveSpeed;
+                slowestDays = Math.Max(slowestDays, shipDays);
+            }
+        }
+        return slowestDays;
     }
 
     private static void DeductCrewUpkeep(Ship ship, WorldState state)

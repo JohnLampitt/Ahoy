@@ -56,6 +56,10 @@ public sealed class QuestSystem : IWorldSystem
                     fulfilled = true;
                 }
             }
+            else if (contract.Condition == ContractConditionType.GoodsDelivered)
+            {
+                fulfilled = TryFulfillGoodsDelivery(contract, state, events, context.TickNumber);
+            }
 
             if (fulfilled)
             {
@@ -137,8 +141,12 @@ public sealed class QuestSystem : IWorldSystem
                 continue;
 
             // Intel gate: require a separate fact about TargetSubjectKey with Confidence > 0.50
-            var intelFact = playerFacts
-                .FirstOrDefault(f => KnowledgeFact.GetSubjectKey(f.Claim) == contract.TargetSubjectKey
+            // GoodsDelivered uses a Port:... key — no separate location fact will exist for it.
+            // Treat the contract itself as self-validating for GoodsDelivered.
+            var intelFact = contract.Condition == ContractConditionType.GoodsDelivered
+                ? contractFact   // self-validating: the contract IS the intel
+                : playerFacts.FirstOrDefault(f =>
+                    KnowledgeFact.GetSubjectKey(f.Claim) == contract.TargetSubjectKey
                     && f.Confidence > 0.50f);
 
             if (intelFact is null)
@@ -189,6 +197,79 @@ public sealed class QuestSystem : IWorldSystem
         var guidStr = subjectKey["Individual:".Length..];
         if (!Guid.TryParse(guidStr, out var guid)) return false;
         individualId = new IndividualId(guid);
+        return true;
+    }
+
+    private static bool TryParseGoodsDeliveryKey(
+        string subjectKey, out PortId portId, out TradeGood good)
+    {
+        portId = default; good = default;
+        // Expected format: "Port:{guid}:{TradeGoodName}"
+        var parts = subjectKey.Split(':');
+        if (parts.Length != 3 || parts[0] != "Port") return false;
+        if (!Guid.TryParse(parts[1], out var g)) return false;
+        if (!Enum.TryParse<TradeGood>(parts[2], out good)) return false;
+        portId = new PortId(g);
+        return true;
+    }
+
+    /// <summary>
+    /// Aggregates cargo across the entire fleet at the port, deducts iteratively,
+    /// mutates state, and returns true if the delivery was completed.
+    /// </summary>
+    private static bool TryFulfillGoodsDelivery(
+        ContractClaim contract, WorldState state, IEventEmitter events, int currentTick)
+    {
+        if (!TryParseGoodsDeliveryKey(contract.TargetSubjectKey, out var portId, out var good))
+            return false;
+        const int DeliveryQty = 20;
+
+        // Aggregate available cargo across all fleet ships docked at portId
+        var playerShip = state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
+        var allFleetIds = state.Player.FleetIds.AsEnumerable();
+        if (playerShip is not null)
+            allFleetIds = allFleetIds.Prepend(playerShip.Id);
+
+        var dockedFleetShips = allFleetIds
+            .Distinct()
+            .Where(id => state.Ships.TryGetValue(id, out var s)
+                         && s.Location is AtPort ap && ap.Port == portId)
+            .Select(id => state.Ships[id])
+            .ToList();
+
+        var totalAvailable = dockedFleetShips.Sum(s => s.Cargo.GetValueOrDefault(good));
+        if (totalAvailable < DeliveryQty) return false;
+
+        // Deduct iteratively across ships until DeliveryQty satisfied
+        var remaining = DeliveryQty;
+        foreach (var ship in dockedFleetShips)
+        {
+            if (remaining <= 0) break;
+            var take = Math.Min(remaining, ship.Cargo.GetValueOrDefault(good));
+            ship.Cargo[good] -= take;
+            if (ship.Cargo[good] <= 0) ship.Cargo.Remove(good);
+            remaining -= take;
+        }
+
+        // Add supply to port
+        if (state.Ports.TryGetValue(portId, out var port))
+            port.Economy.Supply[good] = port.Economy.Supply.GetValueOrDefault(good) + DeliveryQty;
+
+        // Pay player
+        state.Player.PersonalGold += contract.GoldReward;
+
+        // Supersede the ContractClaim in PlayerHolder — pass actual tick
+        var contractFact = state.Knowledge.GetFacts(new PlayerHolder())
+            .FirstOrDefault(f => !f.IsSuperseded && f.Claim is ContractClaim cc
+                && KnowledgeFact.GetSubjectKey(cc) == KnowledgeFact.GetSubjectKey(contract));
+        if (contractFact is not null)
+            state.Knowledge.MarkSuperseded(new PlayerHolder(), contractFact, currentTick);
+
+        events.Emit(new ContractFulfilled(
+            state.Date, SimulationLod.Local,
+            contract.IssuerId, contract.TargetSubjectKey, contract.GoldReward),
+            SimulationLod.Local);
+
         return true;
     }
 }

@@ -18,6 +18,7 @@ public sealed class WorldState
     public Dictionary<FactionId, Faction> Factions { get; } = new();
     public Dictionary<ShipId, Ship> Ships { get; } = new();
     public Dictionary<IndividualId, Individual> Individuals { get; } = new();
+    public Dictionary<OceanPoiId, OceanPoi> OceanPois { get; } = new();
 
     // ---- Player ----
     public PlayerState Player { get; } = new() { CaptainName = "Unknown" };
@@ -60,6 +61,7 @@ public sealed class WorldState
         {
             AtPort ap when Ports.TryGetValue(ap.Port, out var p) => p.RegionId,
             AtSea @as => @as.Region,
+            AtPoi atPoi => atPoi.Region,
             EnRoute er => er.From,
             _ => null,
         };

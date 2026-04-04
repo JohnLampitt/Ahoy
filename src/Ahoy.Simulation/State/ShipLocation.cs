@@ -1,4 +1,5 @@
 using Ahoy.Core.Ids;
+using Ahoy.Core.Enums;
 
 namespace Ahoy.Simulation.State;
 
@@ -17,3 +18,6 @@ public record EnRoute(RegionId From, RegionId To, float ProgressDays, float Tota
     /// <summary>Fractional progress 0..1.</summary>
     public float Progress => TotalDays > 0 ? ProgressDays / TotalDays : 1f;
 }
+
+/// <summary>Ship is stopped at an ocean point of interest, resolving its encounter.</summary>
+public record AtPoi(OceanPoiId Poi, RegionId Region) : ShipLocation;

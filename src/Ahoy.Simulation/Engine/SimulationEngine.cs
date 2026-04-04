@@ -149,6 +149,70 @@ public sealed class SimulationEngine
                     anchorShip.RoutingDestination = null;
                 break;
 
+            case SetCourseToPoi scp:
+                if (_state.Ships.TryGetValue(scp.ShipId, out var poiShip)
+                    && _state.OceanPois.ContainsKey(scp.PoiId))
+                {
+                    poiShip.PoiDestination = scp.PoiId;
+                    poiShip.RoutingDestination = null;   // clear any port destination
+                }
+                break;
+
+            case SetFleetCourseCommand sfc:
+            {
+                if (!_state.Ports.ContainsKey(sfc.DestinationPort)) break;
+                var convoyId = Guid.NewGuid();
+                var dockedShips = new List<ShipId>();
+                PortId? firstPort = null;
+
+                foreach (var shipId in _state.Player.FleetIds)
+                {
+                    if (!_state.Ships.TryGetValue(shipId, out var fleetShip)) continue;
+                    if (fleetShip.Location is not State.AtPort fleetAtPort) continue;
+
+                    fleetShip.ConvoyId = convoyId;
+                    fleetShip.RoutingDestination = sfc.DestinationPort;
+                    dockedShips.Add(shipId);
+                    firstPort ??= fleetAtPort.Port;
+                }
+
+                if (dockedShips.Count > 0 && firstPort.HasValue)
+                {
+                    _emitter.Emit(new Events.FleetDeparted(
+                        _state.Date, Core.Enums.SimulationLod.Local,
+                        dockedShips, firstPort.Value, sfc.DestinationPort),
+                        Core.Enums.SimulationLod.Local);
+                }
+                break;
+            }
+
+            case TransferCargoCommand xfer:
+            {
+                if (!_state.Ships.TryGetValue(xfer.FromShip, out var fromS)) break;
+                if (!_state.Ships.TryGetValue(xfer.ToShip, out var toS)) break;
+
+                // Both ships must be AtPort at the same port
+                if (fromS.Location is not State.AtPort fromAp) break;
+                if (toS.Location is not State.AtPort toAp) break;
+                if (fromAp.Port != toAp.Port) break;
+
+                var available = fromS.Cargo.GetValueOrDefault(xfer.Good);
+                var toUsed = toS.Cargo.Values.Sum();
+                var toSpace = toS.MaxCargoTons - toUsed;
+                var qty = Math.Min(xfer.Quantity, Math.Min(available, toSpace));
+                if (qty <= 0) break;
+
+                fromS.Cargo[xfer.Good] -= qty;
+                if (fromS.Cargo[xfer.Good] <= 0) fromS.Cargo.Remove(xfer.Good);
+                toS.Cargo[xfer.Good] = toS.Cargo.GetValueOrDefault(xfer.Good) + qty;
+
+                _emitter.Emit(new Events.TradeCompleted(
+                    _state.Date, Core.Enums.SimulationLod.Local,
+                    xfer.ToShip, fromAp.Port, xfer.Good, qty, 0, true),
+                    Core.Enums.SimulationLod.Local);
+                break;
+            }
+
             case BuyGoodCommand buy:
                 if (_state.Ships.TryGetValue(buy.ShipId, out var buyShip) &&
                     _state.Ports.TryGetValue(buy.PortId, out var buyPort) &&
@@ -227,29 +291,55 @@ public sealed class SimulationEngine
 
             case FabricateFactCommand fab:
             {
-                // Create a disinformation ContractClaim and inject it into the player's knowledge
-                var fakeClaim = new State.ContractClaim(
-                    fab.FakeIssuerId,
-                    // We don't know the faction here — use a placeholder (empty faction id won't exist)
-                    // The player is fabricating a contract; we need a FactionId. Use a stub via a zero GUID.
-                    new Core.Ids.FactionId(Guid.Empty),
-                    fab.TargetSubjectKey,
-                    fab.Condition,
-                    fab.ClaimedReward);
+                // Player must be at a port to plant disinformation
+                var playerShipFab = _state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
+                if (playerShipFab?.Location is not State.AtPort fabAtPort) break;
+
+                // Cost: 200g per fabrication
+                if (_state.Player.PersonalGold < 200) break;
+                _state.Player.PersonalGold -= 200;
 
                 var fabricatedFact = new State.KnowledgeFact
                 {
-                    Claim          = fakeClaim,
-                    Sensitivity    = Core.Enums.KnowledgeSensitivity.Restricted,
-                    Confidence     = 0.85f,
-                    BaseConfidence = 0.85f,
-                    ObservedDate   = _state.Date,
-                    HopCount       = 0,
-                    SourceHolder   = null,
+                    Claim            = fab.FabricatedClaim,
+                    Sensitivity      = Core.Enums.KnowledgeSensitivity.Restricted,
+                    Confidence       = 0.85f,
+                    BaseConfidence   = 0.85f,
+                    ObservedDate     = _state.Date,
+                    HopCount         = 0,
+                    SourceHolder     = new State.FactionHolder(fab.AppearsToBeFromFaction),
                     IsDisinformation = true,
+                    OriginatingAgentId = null,   // player planted it, not an NPC agent
                 };
+
+                // Seed into PlayerHolder (player knows what they planted)
                 _state.Knowledge.MarkSuperseded(new State.PlayerHolder(), fabricatedFact, _tickNumber);
                 _state.Knowledge.AddFact(new State.PlayerHolder(), fabricatedFact);
+
+                // Seed into 1–2 random ports in the player's current region
+                if (_state.Ports.TryGetValue(fabAtPort.Port, out var fabPort)
+                    && _state.Regions.TryGetValue(fabPort.RegionId, out var fabRegion))
+                {
+                    var portList = fabRegion.Ports.ToList();
+                    var seedCount = Math.Min(portList.Count, 1 + _rng.Next(2)); // 1 or 2
+                    foreach (var portId in portList.Take(seedCount))
+                    {
+                        var portCopy = new State.KnowledgeFact
+                        {
+                            Claim            = fab.FabricatedClaim,
+                            Sensitivity      = Core.Enums.KnowledgeSensitivity.Restricted,
+                            Confidence       = 0.70f,
+                            BaseConfidence   = 0.70f,
+                            ObservedDate     = _state.Date,
+                            HopCount         = 1,
+                            SourceHolder     = new State.FactionHolder(fab.AppearsToBeFromFaction),
+                            IsDisinformation = true,
+                            OriginatingAgentId = null,
+                        };
+                        _state.Knowledge.MarkSuperseded(new State.PortHolder(portId), portCopy, _tickNumber);
+                        _state.Knowledge.AddFact(new State.PortHolder(portId), portCopy);
+                    }
+                }
                 break;
             }
 
@@ -382,6 +472,55 @@ public sealed class SimulationEngine
                 var playerShip = _state.Ships.Values.FirstOrDefault(s => s.IsPlayerShip);
                 if (playerShip?.Location is not State.AtPort localAtPort) break;
 
+                // Allegiance investigation: subject key format "Allegiance:{guid}"
+                if (local.SubjectKey.StartsWith("Allegiance:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var guidStr = local.SubjectKey["Allegiance:".Length..];
+                    if (!Guid.TryParse(guidStr, out var allegianceGuid)) break;
+                    var suspectId = new Core.Ids.IndividualId(allegianceGuid);
+                    if (!_state.Individuals.TryGetValue(suspectId, out var suspect)) break;
+
+                    // Cost: 500g flat
+                    if (_state.Player.PersonalGold < 500) break;
+                    _state.Player.PersonalGold -= 500;
+
+                    if (suspect.IsInfiltrator)
+                    {
+                        // ClaimedFaction = the cover story; ActualFaction = ground-truth FactionId
+                        var allegianceClaim = new State.IndividualAllegianceClaim(
+                            suspectId,
+                            ClaimedFaction: suspect.ClaimedFactionId!.Value,
+                            ActualFaction:  suspect.FactionId ?? default);
+                        var allegianceFact = new State.KnowledgeFact
+                        {
+                            Claim          = allegianceClaim,
+                            Sensitivity    = Core.Enums.KnowledgeSensitivity.Secret,
+                            Confidence     = 0.95f,
+                            BaseConfidence = 0.95f,
+                            ObservedDate   = _state.Date,
+                            IsDecayExempt  = true,
+                            HopCount       = 0,
+                            SourceHolder   = null,
+                        };
+                        _state.Knowledge.MarkSuperseded(new State.PlayerHolder(), allegianceFact, _tickNumber);
+                        _state.Knowledge.AddFact(new State.PlayerHolder(), allegianceFact);
+                        _emitter.Emit(new Events.AllegianceRevealed(
+                            _state.Date, Core.Enums.SimulationLod.Local,
+                            suspectId,
+                            ActualFaction:  suspect.FactionId!.Value,
+                            ClaimedFaction: suspect.ClaimedFactionId!.Value),
+                            Core.Enums.SimulationLod.Local);
+                    }
+                    else
+                    {
+                        _emitter.Emit(new Events.InvestigationResolved(
+                            _state.Date, Core.Enums.SimulationLod.Local,
+                            local.SubjectKey, null, false),
+                            Core.Enums.SimulationLod.Local);
+                    }
+                    break;
+                }
+
                 // Find the best matching fact in the current port's knowledge pool
                 var portFact = _state.Knowledge.GetFacts(new State.PortHolder(localAtPort.Port))
                     .Where(f => !f.IsSuperseded
@@ -406,6 +545,28 @@ public sealed class SimulationEngine
                     _state.Knowledge.AddFact(new State.PlayerHolder(), observed);
                     _emitter.Emit(new Events.InvestigationResolved(_state.Date, Core.Enums.SimulationLod.Local,
                         local.SubjectKey, observed.Id, true), Core.Enums.SimulationLod.Local);
+
+                    // Check if this new observation contradicts any disinformation the player holds
+                    var portFabAtPort = localAtPort.Port;
+                    var disInfoFacts = _state.Knowledge.GetFacts(new State.PlayerHolder())
+                        .Where(f => f.IsDisinformation && !f.IsSuperseded
+                            && KnowledgeFact.GetSubjectKey(f.Claim) == local.SubjectKey)
+                        .ToList();
+
+                    foreach (var disFact in disInfoFacts)
+                    {
+                        if (disFact.Claim.GetType() == portFact.Claim.GetType()) continue;
+                        FactionId? deceiver = (disFact.SourceHolder as State.FactionHolder)?.Faction;
+                        if (deceiver.HasValue)
+                        {
+                            InjectDisinformationCorrection(
+                                new State.PlayerHolder(),
+                                disFact,
+                                portFact.Claim,
+                                deceiver.Value,
+                                portFabAtPort);
+                        }
+                    }
                 }
                 else
                 {
@@ -553,6 +714,34 @@ public sealed class SimulationEngine
                 // Burn the agent
                 target.IsCompromised = true;
 
+                // Reveal actual allegiance if this individual is an infiltrator
+                if (target.IsInfiltrator)
+                {
+                    var revealClaim = new State.IndividualAllegianceClaim(
+                        burn.AgentId,
+                        ClaimedFaction: target.ClaimedFactionId!.Value,
+                        ActualFaction:  target.FactionId ?? default);
+                    var revealFact = new State.KnowledgeFact
+                    {
+                        Claim          = revealClaim,
+                        Sensitivity    = Core.Enums.KnowledgeSensitivity.Secret,
+                        Confidence     = 1.0f,
+                        BaseConfidence = 1.0f,
+                        ObservedDate   = _state.Date,
+                        IsDecayExempt  = true,
+                        HopCount       = 0,
+                        SourceHolder   = null,
+                    };
+                    _state.Knowledge.MarkSuperseded(new State.PlayerHolder(), revealFact, _tickNumber);
+                    _state.Knowledge.AddFact(new State.PlayerHolder(), revealFact);
+                    _emitter.Emit(new Events.AllegianceRevealed(
+                        _state.Date, Core.Enums.SimulationLod.Local,
+                        burn.AgentId,
+                        ActualFaction:  target.FactionId!.Value,
+                        ClaimedFaction: target.ClaimedFactionId!.Value),
+                        Core.Enums.SimulationLod.Local);
+                }
+
                 // Penalise the agent's entire IndividualHolder inventory
                 foreach (var fact in _state.Knowledge.GetFacts(new State.IndividualHolder(burn.AgentId)))
                     fact.Confidence = Math.Max(0f, fact.Confidence - 0.30f);
@@ -608,6 +797,54 @@ public sealed class SimulationEngine
                 break;
             }
         }
+    }
+
+    /// <summary>
+    /// Called when direct observation contradicts a disinformation fact held by the player.
+    /// Supersedes the lie, degrades source reliability, emits DeceptionExposed,
+    /// and enqueues a FactionStimulus so the deceiving faction responds next tick.
+    /// </summary>
+    private void InjectDisinformationCorrection(
+        State.KnowledgeHolderId holder,
+        State.KnowledgeFact disInfoFact,
+        State.KnowledgeClaim actualClaim,
+        Core.Ids.FactionId deceivingFactionId,
+        Core.Ids.PortId? exposedAtPort)
+    {
+        // 1. Add correcting fact (high confidence, not disinformation) — supersedes the lie
+        var correctionFact = new State.KnowledgeFact
+        {
+            Claim          = actualClaim,
+            Sensitivity    = Core.Enums.KnowledgeSensitivity.Public,
+            Confidence     = 0.90f,
+            BaseConfidence = 0.90f,
+            ObservedDate   = _state.Date,
+            HopCount       = 0,
+            SourceHolder   = null,    // player witnessed directly
+        };
+        _state.Knowledge.MarkSuperseded(holder, correctionFact, _tickNumber);
+        _state.Knowledge.AddFact(holder, correctionFact);
+
+        // 2. Degrade source reliability for the deceiving faction
+        if (disInfoFact.SourceHolder is not null)
+            _state.Knowledge.RecordSourceOutcome(disInfoFact.SourceHolder, wasAccurate: false);
+
+        // 3. Emit DeceptionExposed event
+        _emitter.Emit(new Events.DeceptionExposed(
+            _state.Date, Core.Enums.SimulationLod.Local,
+            deceivingFactionId, exposedAtPort),
+            Core.Enums.SimulationLod.Local);
+
+        // 4. Enqueue FactionStimulus for the deceiving faction
+        _state.PendingFactionStimuli.Enqueue(new State.FactionStimulus
+        {
+            FactionId     = deceivingFactionId,
+            StimulusType  = "DeceptionExposed",
+            Magnitude     = 0.5f,
+            Description   = "Player exposed disinformation planted by this faction",
+            PortId        = exposedAtPort,
+            PlayerIsOrigin = true,
+        });
     }
 
     private static void ApplyCompletedDecision(ActorDecisionRequest request)

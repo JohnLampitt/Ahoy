@@ -56,6 +56,28 @@ public record ContractClaim(
     int GoldReward,
     NarrativeArchetype Archetype = NarrativeArchetype.PoliticalBounty) : KnowledgeClaim;
 
+/// <summary>
+/// What an actor believes about an ocean POI.
+/// Uses PoiCacheStatus (not raw gold) so NPC gossip doesn't leak exact treasury values —
+/// a sailor who saw Vane's crew celebrating might say "the cache is empty," not "432g remains."
+/// </summary>
+public record OceanPoiClaim(
+    OceanPoiId Poi,
+    RegionId Region,
+    PoiType Type,
+    bool IsDiscovered,
+    PoiCacheStatus CacheStatus) : KnowledgeClaim;
+
+/// <summary>
+/// Records the player's belief about an individual's loyalty.
+/// ClaimedFaction is the cover story (what the individual publicly presents).
+/// ActualFaction is the ground truth (what they really serve) — null until exposed.
+/// </summary>
+public record IndividualAllegianceClaim(
+    IndividualId Individual,
+    FactionId ClaimedFaction,
+    FactionId? ActualFaction) : KnowledgeClaim;
+
 // ---- KnowledgeFact ----
 
 public sealed class KnowledgeFact
@@ -158,8 +180,10 @@ public sealed class KnowledgeFact
         // Each distinct quest resolution is its own subject — two A1 completions on different ships don't supersede each other.
         PlayerActionClaim c        => $"PlayerAction:{c.QuestTemplateId}:{c.BranchId}",
         CustomClaim c              => $"Custom:{c.Subject}",
-        ContractClaim c            => $"Contract:{c.IssuerId.Value}:{c.TargetSubjectKey}",
-        _                          => claim.GetType().Name,
+        ContractClaim c                 => $"Contract:{c.IssuerId.Value}:{c.TargetSubjectKey}",
+        OceanPoiClaim c                 => $"Poi:{c.Poi.Value}",
+        IndividualAllegianceClaim c     => $"Allegiance:{c.Individual.Value}",
+        _                               => claim.GetType().Name,
     };
 }
 
@@ -301,6 +325,13 @@ public sealed class KnowledgeStore
     /// </summary>
     public bool IsAnchored(KnowledgeHolderId holder, float confidenceThreshold = 0.7f)
         => GetFacts(holder).Any(f => f.Confidence >= confidenceThreshold);
+
+    /// <summary>
+    /// Returns every fact across all holders, paired with the holder that owns it.
+    /// Used by KnowledgeSystem for cross-holder disinformation contradiction scanning.
+    /// </summary>
+    public IReadOnlyList<(KnowledgeHolderId Holder, KnowledgeFact Fact)> GetAllFactsWithHolders()
+        => _store.SelectMany(kv => kv.Value.Select(f => (kv.Key, f))).ToList();
 
     // ---- Conflict maintenance ----
 
