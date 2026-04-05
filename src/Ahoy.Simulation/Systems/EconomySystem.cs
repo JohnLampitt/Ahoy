@@ -65,6 +65,68 @@ public sealed class EconomySystem : IWorldSystem
             // If arrived this tick — process knowledge gossip (KnowledgeSystem handles this;
             // EconomySystem just ensures cargo is exchanged before KnowledgeSystem runs)
         }
+
+        // Crisis 2: Epidemic propagation
+        TickEpidemics(state, events);
+    }
+
+    // ---- Crisis 2: Epidemic Outbreak ----
+
+    private void TickEpidemics(WorldState state, IEventEmitter events)
+    {
+        // Random epidemic spawning on tropical ports (2% per tick)
+        foreach (var port in state.Ports.Values)
+        {
+            if (port.Conditions.HasFlag(PortConditionFlags.Plague)) continue;
+            if (_rng.NextDouble() < 0.002) // 0.2% — rare but devastating
+            {
+                port.Conditions |= PortConditionFlags.Plague;
+                port.EpidemicTicksRemaining = 30;
+            }
+        }
+
+        // Tick active epidemics
+        foreach (var port in state.Ports.Values)
+        {
+            if (!port.Conditions.HasFlag(PortConditionFlags.Plague)) continue;
+
+            // Natural decay
+            if (port.EpidemicTicksRemaining.HasValue)
+            {
+                port.EpidemicTicksRemaining--;
+                if (port.EpidemicTicksRemaining <= 0)
+                {
+                    port.Conditions &= ~PortConditionFlags.Plague;
+                    port.EpidemicTicksRemaining = null;
+                    continue;
+                }
+            }
+
+            // Infect docked ships (10% per tick)
+            foreach (var shipId in port.DockedShips)
+            {
+                if (!state.Ships.TryGetValue(shipId, out var ship)) continue;
+                if (ship.HasInfectedCrew) continue;
+                if (_rng.NextDouble() < 0.10)
+                    ship.HasInfectedCrew = true;
+            }
+        }
+
+        // Infected ships spread to clean ports (5% per tick on dock)
+        foreach (var ship in state.Ships.Values)
+        {
+            if (!ship.HasInfectedCrew) continue;
+            if (!ship.ArrivedThisTick) continue;
+            if (ship.Location is not AtPort atPort) continue;
+            if (!state.Ports.TryGetValue(atPort.Port, out var port)) continue;
+            if (port.Conditions.HasFlag(PortConditionFlags.Plague)) continue;
+
+            if (_rng.NextDouble() < 0.05)
+            {
+                port.Conditions |= PortConditionFlags.Plague;
+                port.EpidemicTicksRemaining = 30;
+            }
+        }
     }
 
     private static void ApplyConditionFlags(Port port)

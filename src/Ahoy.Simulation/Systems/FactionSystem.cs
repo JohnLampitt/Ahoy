@@ -61,11 +61,111 @@ public sealed class FactionSystem : IWorldSystem
             TickIntentionLeaks(faction, factionId, state, context, events);
             TickCounterIntelligence(faction, factionId, state, context.TickNumber);
 
+            TickWarDeclarations(faction, factionId, state, context, events);
+
             if (faction.Type == FactionType.Colonial)
                 SeedContracts(faction, factionId, state, context);
         }
 
+        TickBlockadeDetection(state);
         TickBurnReplacements(state, context, events);
+    }
+
+    // ---- Crisis 6: War declaration ----
+
+    private void TickWarDeclarations(Faction faction, FactionId factionId,
+        WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        // Check for DeclareWar goals
+        foreach (var goal in faction.ActiveGoals.OfType<DeclareWar>().ToList())
+        {
+            if (faction.AtWarWith.Contains(goal.TargetFaction)) continue;
+
+            // War requires relationship below -80
+            if (faction.Relationships.TryGetValue(goal.TargetFaction, out var rel) && rel > -80f)
+                continue;
+
+            faction.AtWarWith.Add(goal.TargetFaction);
+
+            // Reciprocal — the target is also at war with us
+            if (state.Factions.TryGetValue(goal.TargetFaction, out var targetFaction))
+                targetFaction.AtWarWith.Add(factionId);
+
+            // Seed war intention at Public sensitivity — everyone hears fast
+            var warFact = new KnowledgeFact
+            {
+                Claim = new FactionIntentionClaim(factionId, $"Declared war on {goal.TargetFaction.Value}"),
+                Sensitivity = KnowledgeSensitivity.Public,
+                Confidence = 0.95f,
+                BaseConfidence = 0.95f,
+                ObservedDate = state.Date,
+                SourceHolder = new FactionHolder(factionId),
+            };
+            foreach (var portId in faction.ControlledPorts)
+                state.Knowledge.AddFact(new PortHolder(portId), warFact);
+        }
+
+        // Check for SeekPeace goals — end war via treaty
+        foreach (var goal in faction.ActiveGoals.OfType<SeekPeace>().ToList())
+        {
+            if (!faction.AtWarWith.Contains(goal.TargetFaction)) continue;
+
+            // Peace requires both sides to have SeekPeace goals
+            if (!state.Factions.TryGetValue(goal.TargetFaction, out var targetFaction2))
+                continue;
+            if (!targetFaction2.ActiveGoals.Any(g => g is SeekPeace sp && sp.TargetFaction == factionId))
+                continue;
+
+            faction.AtWarWith.Remove(goal.TargetFaction);
+            targetFaction2.AtWarWith.Remove(factionId);
+
+            // Reset relationship to neutral-ish
+            faction.Relationships[goal.TargetFaction] = -20f; // still tense, not friendly
+            targetFaction2.Relationships[factionId] = -20f;
+        }
+    }
+
+    // ---- Crisis 3: Blockade detection ----
+
+    /// <summary>
+    /// Detect blockades: if hostile naval strength in a port's region exceeds
+    /// the port's defense rating, set Blockaded flag. Uses combat tonnage,
+    /// not raw ship count.
+    /// </summary>
+    private static void TickBlockadeDetection(WorldState state)
+    {
+        foreach (var port in state.Ports.Values)
+        {
+            if (port.ControllingFactionId is not { } portFaction) continue;
+
+            // Port defense = faction's patrol allocation for this region × 10 + base 20
+            var defenseRating = 20;
+            if (state.Factions.TryGetValue(portFaction, out var faction))
+                defenseRating += faction.PatrolAllocations.GetValueOrDefault(port.RegionId) * 10;
+
+            // Sum hostile naval strength in port's region
+            var hostileStrength = 0;
+            foreach (var ship in state.Ships.Values)
+            {
+                if (ship.OwnerFactionId is null) continue;
+                if (ship.OwnerFactionId == portFaction) continue;
+
+                // Check if this faction is at war with the port's faction
+                if (!state.Factions.TryGetValue(ship.OwnerFactionId.Value, out var shipFaction))
+                    continue;
+                if (!shipFaction.AtWarWith.Contains(portFaction)) continue;
+
+                var shipRegion = state.GetShipRegion(ship.Id);
+                if (shipRegion != port.RegionId) continue;
+
+                hostileStrength += ship.Guns; // combat tonnage approximated by guns
+            }
+
+            if (hostileStrength > defenseRating)
+                port.Conditions |= PortConditionFlags.Blockaded;
+            else
+                port.Conditions &= ~PortConditionFlags.Blockaded;
+        }
     }
 
     // ---- Colonial ----
