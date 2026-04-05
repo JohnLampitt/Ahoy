@@ -77,8 +77,20 @@ public sealed class WorldState
     public Dictionary<FactionId, Faction>     Factions    { get; } = new();
     public Dictionary<ShipId, Ship>           Ships       { get; } = new();
     public Dictionary<IndividualId, Individual> Individuals { get; } = new();
+    public Dictionary<OceanPoiId, OceanPoi>   OceanPois   { get; } = new();
 
     public PlayerState Player { get; } = new();
+
+    // Cross-cutting systems
+    public KnowledgeStore Knowledge { get; } = new();
+    public QuestStore Quests { get; } = new();
+    public Dictionary<RegionId, RegionWeather> Weather { get; } = new();
+
+    // NPC-to-NPC relationship matrix (Group 6B) — sparse, -100..+100
+    public Dictionary<(IndividualId, IndividualId), float> RelationshipMatrix { get; } = new();
+
+    // NPC goal pursuit (Group 5B) — cross-system visibility
+    public Dictionary<IndividualId, GoalPursuit> NpcPursuits { get; } = new();
 }
 ```
 
@@ -222,129 +234,166 @@ Price is recalculated each tick by `EconomySystem` based on the ratio of supply 
 An actor in the living world with goals, resources, and relationships.
 
 ```csharp
-// Ahoy.Simulation/State/Faction.cs
-
 public sealed class Faction
 {
-    public FactionId   Id    { get; init; }
-    public string      Name  { get; init; } = string.Empty;
-    public FactionType Type  { get; init; }   // Colonial | PirateBrotherhood
+    public FactionId Id { get; init; }
+    public string Name { get; init; }
+    public FactionType Type { get; init; }   // Colonial | PirateBrotherhood
 
     // Resources
-    public int Treasury      { get; internal set; }
-    public int NavalStrength { get; internal set; }  // abstract unit — patrol capacity
+    public int TreasuryGold { get; set; }
+    public int IncomePerTick { get; set; }
+    public int ExpenditurePerTick { get; set; }
+    public int NavalStrength { get; set; }
 
-    // Relationships with other factions — keyed by the other faction's ID
-    public Dictionary<FactionId, FactionRelationship> Relationships { get; } = new();
+    // Relationships — continuous float, -100..+100
+    public Dictionary<FactionId, float> Relationships { get; } = new();
 
-    // Current active goals, evaluated each tick
-    public List<FactionGoal> Goals { get; } = new();
+    // Discrete war state — prevents float-oscillation, requires formal treaty to clear
+    public HashSet<FactionId> AtWarWith { get; } = new();
 
-    // Ports this faction controls
+    // Ports and territories
     public List<PortId> ControlledPorts { get; } = new();
-}
+    public List<RegionId> ClaimedRegions { get; } = new();
 
-public enum FactionType { Colonial, PirateBrotherhood }
-```
+    // Active goals — evaluated each tick by FactionSystem
+    public List<FactionGoal> ActiveGoals { get; } = new();
 
-```csharp
-// Ahoy.Simulation/State/FactionRelationship.cs
+    // Intelligence
+    public float IntelligenceCapability { get; set; } = 0.30f;  // 0.10..0.95
 
-public sealed class FactionRelationship
-{
-    public FactionId Other     { get; init; }
-    public int       Standing  { get; internal set; }  // -100 (war) to 100 (alliance)
-
-    // Key events that have shaped this relationship — used by FactionSystem
-    // to drive Standing changes and by the frontend to explain the current state
-    public List<RelationshipEvent> History { get; } = new();
+    // Pirate-specific
+    public float Cohesion { get; set; } = 70f;
+    public float RaidingMomentum { get; set; } = 50f;
 }
 ```
 
-`FactionGoal` is a discriminated union (abstract base with concrete subtypes) covering objectives like `ConquerPort`, `ExpandTrade`, `SuppressPiracy`, `FormAlliance`. `FactionSystem` evaluates goals each tick and acts on them.
+`FactionGoal` subtypes: `ExpandTerritory`, `ConsolidateTerritory`, `SuppressPiracy`,
+`BuildNavy`, `AccumulateTreasury`, `NegotiateTreaty`, `RaidShippingLane`,
+`EstablishHaven`, `EspionageGoal`, `DeclareWar`, `SeekPeace`.
+
+`AtWarWith` is a discrete state set via `DeclareWar` goal when relationship < -80.
+Cleared only by mutual `SeekPeace` goals + treaty event. Prevents the
+oscillation that would occur if war were tied to a floating-point threshold.
 
 ---
 
 ### 4.7 Ship
 
-A vessel in the world. Ships are the primary mobile entity — they belong to factions or the player and move between ports and sea regions.
+A vessel in the world. Ships are the primary mobile entity — they belong to
+factions or the player and move between ports and sea regions.
 
 ```csharp
-// Ahoy.Simulation/State/Ship.cs
+// Routing intent — discriminated union (Group 5B)
+public abstract record ShipRoute;
+public record PortRoute(PortId Destination) : ShipRoute;
+public record PursuitRoute(ShipId Target, RegionId LastKnownRegion) : ShipRoute;
+public record PoiRoute(OceanPoiId Poi) : ShipRoute;
 
 public sealed class Ship
 {
-    public ShipId      Id       { get; init; }
-    public string      Name     { get; init; } = string.Empty;
-    public ShipClass   Class    { get; init; }
+    public ShipId Id { get; init; }
+    public string Name { get; set; }
+    public ShipClass Class { get; init; }
 
     // Ownership
-    public FactionId?    OwningFaction { get; internal set; }
-    public IndividualId? CaptainId     { get; internal set; }
+    public FactionId? OwnerFactionId { get; set; }
+    public IndividualId? CaptainId { get; set; }
+    public FactionId? ClaimedOwnerFactionId { get; set; }  // false colours
 
     // Condition
-    public int HullIntegrity   { get; internal set; }  // 0–100
-    public int CrewCount       { get; internal set; }
-    public int CrewCapacity    { get; init; }
+    public float HullIntegrity { get; set; } = 1.0f;  // 0..1
+    public int CurrentCrew { get; set; }
+    public int MaxCrew { get; init; }
+    public int Guns { get; init; }
 
     // Cargo
     public Dictionary<TradeGood, int> Cargo { get; } = new();
-    public int CargoCapacity             { get; init; }
+    public int MaxCargoTons { get; init; }
+    public int GoldOnBoard { get; set; }
 
-    // Location — a ship is either in port or at sea in a region
-    public ShipLocation Location { get; internal set; }
+    // Location
+    public ShipLocation Location { get; set; }
+    public ShipRoute? Route { get; set; }  // routing intent
+    public bool ArrivedThisTick { get; set; }  // transient
+    public int TicksDockedAtCurrentPort { get; set; }
+
+    // Crisis state
+    public bool HasInfectedCrew { get; set; }        // epidemic propagation
+    public KnowledgeFactId? CarriedIntelPackage { get; set; }  // captured secret documents
+
+    // Flags
+    public bool IsPlayerShip { get; init; }
+    public bool IsPirate { get; set; }
 }
 
-// Discriminated union for location
+// Location — discriminated union
 public abstract record ShipLocation;
-public record AtPort(PortId Port)           : ShipLocation;
-public record AtSea(RegionId Region)        : ShipLocation;
-public record EnRoute(RegionId From, RegionId To, int DaysRemaining) : ShipLocation;
+public record AtPort(PortId Port) : ShipLocation;
+public record AtSea(RegionId Region) : ShipLocation;
+public record EnRoute(RegionId From, RegionId To, float ProgressDays, float TotalDays) : ShipLocation;
+public record AtPoi(OceanPoiId Poi, RegionId Region) : ShipLocation;
 ```
 
 ---
 
 ### 4.8 Individual
 
-A named NPC. Governors, rival captains, merchants, key crew. Generated by the world, not hand-crafted.
+A named NPC — governors, captains, brokers, informants, diplomats. Generated
+by the world at startup and through faction replacement mechanics.
 
 ```csharp
-// Ahoy.Simulation/State/Individual.cs
-
 public sealed class Individual
 {
-    public IndividualId Id     { get; init; }
-    public string       Name   { get; init; } = string.Empty;
-    public IndividualRole Role  { get; internal set; }
+    public IndividualId Id { get; init; }
+    public string FirstName { get; set; }
+    public string LastName { get; set; }
+    public IndividualRole Role { get; set; }
+    public FactionId? FactionId { get; set; }
 
-    // Personality — influences decision-making in systems
+    public PortId? LocationPortId { get; set; }     // null = at sea
+    public PortId? HomePortId { get; set; }          // null for nomadic (pirates, brokers)
+    public int? TourTicksRemaining { get; set; }     // governor inspection tours
+
+    public float Authority { get; set; } = 50f;      // 0–100
     public PersonalityTraits Personality { get; init; }
-
-    // Career — what has this individual done and where
     public List<CareerEntry> CareerHistory { get; } = new();
 
-    // Personal reputation with player (-100 to 100)
-    // Distinct from the port's institutional reputation
-    // Resets to a dim inherited value on governor succession
-    public int PersonalReputationWithPlayer { get; internal set; }
+    // Player relationship (legacy — being subsumed by RelationshipMatrix)
+    public float PlayerRelationship { get; set; }
 
-    // Specific memories of player interactions
-    // e.g. "Player spared my ship on WorldDate(412)"
-    public List<InteractionMemory> Memories { get; } = new();
+    // Flags
+    public bool IsAlive { get; set; } = true;
+    public bool IsPlayerKnown { get; set; }
+    public bool IsCompromised { get; set; }          // burned agent
 
-    public bool IsAlive { get; internal set; } = true;
+    // Hidden loyalty — infiltrator model
+    public FactionId? ClaimedFactionId { get; set; }  // cover story
+    public bool IsInfiltrator => ClaimedFactionId.HasValue && ClaimedFactionId != FactionId;
+
+    // Wealth
+    public int CurrentGold { get; set; }
+
+    // Captivity (Crisis 1: VIP Abduction)
+    public IndividualId? CaptorId { get; set; }
 }
 
-public enum IndividualRole { Governor, RivalCaptain, Merchant, CrewMember }
+public enum IndividualRole
+{
+    Governor, PortMerchant, NavalOfficer, PirateCaptain,
+    Smuggler, Informant, KnowledgeBroker, Diplomat, Privateer
+}
 ```
 
 ```csharp
-public readonly record struct PersonalityTraits(
-    int Greed,        // 0–100: influences bribe receptiveness, trade fairness
-    int Ambition,     // 0–100: drives career advancement behaviour
-    int Loyalty,      // 0–100: resistance to faction switching, crew defection
-    int Boldness      // 0–100: risk tolerance in faction/combat decisions
-);
+public sealed record PersonalityTraits
+{
+    public float Greed { get; init; }      // -1..+1 (principled ↔ self-interested)
+    public float Boldness { get; init; }   // -1..+1 (cautious ↔ reckless)
+    public float Loyalty { get; init; }    // -1..+1 (opportunistic ↔ keeps word)
+    public float Cunning { get; init; }    // -1..+1 (straightforward ↔ deceptive)
+    public float Ambition { get; init; }   // -1..+1 (anonymous ↔ craves status)
+}
 ```
 
 ---
@@ -358,16 +407,18 @@ The player's position in the world — their assets, reputation, and knowledge.
 
 public sealed class PlayerState
 {
-    // The player's ships (first is the flagship)
-    public List<ShipId> ShipIds { get; } = new();
+    public string CaptainName { get; set; }
+    public IndividualId CaptainIndividualId { get; set; }  // for RelationshipMatrix
 
-    public int Gold { get; internal set; }
+    public ShipId? FlagshipId { get; set; }
+    public List<ShipId> FleetIds { get; } = new();
+    public RegionId? CurrentRegionId { get; set; }
 
-    // Reputation with each faction (-100 to 100)
-    public Dictionary<FactionId, int> FactionReputations { get; } = new();
+    public int PersonalGold { get; set; }
+    public float Notoriety { get; set; }  // 0–100
 
-    // Player knowledge is held in KnowledgeStore via PlayerHolder.
-    // See SDD-KnowledgeSystem §2.4 — KnownEvent/KnowledgeLog removed in v0.2.
+    // Player knowledge held in KnowledgeStore via PlayerHolder.
+    // NPC-to-player relationships held in WorldState.RelationshipMatrix.
 }
 ```
 

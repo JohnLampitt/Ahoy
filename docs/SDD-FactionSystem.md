@@ -601,4 +601,27 @@ public void Tick(WorldState state, SimulationContext context, IEventEmitter even
 
 ---
 
+## 13. Post-v0.1 Additions
+
+### Group 5E — Intention Leaks & Counter-Intelligence (implemented)
+
+- **Low-capability factions** (IntelligenceCapability < 0.35): 2%/tick passive
+  leak of Secret `FactionIntentionClaim` to Restricted in a random controlled port.
+- **Stress-driven leaks** (all factions): 15%/tick when treasury < expenditure × 5
+  or naval strength dropped > 50%.
+- **Counter-intelligence**: Factions with IntelligenceCapability > 0.40 detect
+  enemy infiltrators at cap × 0.01/tick, seeding `IndividualAllegianceClaim`
+  into `FactionHolder`.
+
+### Group 7 — War Declaration & Blockade Detection (implemented)
+
+- **`DeclareWar` / `SeekPeace`** goal subtypes drive discrete `AtWarWith` state.
+  War triggers at relationship < -80. Peace requires mutual `SeekPeace` goals.
+  War intentions seeded at Public sensitivity.
+- **Blockade detection**: Each tick, sums hostile ship guns in each port's region
+  vs port defense rating (patrol allocation × 10 + base 20). Sets/clears
+  `PortConditionFlags.Blockaded`. Uses combat tonnage, not ship count.
+
+---
+
 *Next step: EventPropagationSystem — how world events cascade into downstream state changes.*
