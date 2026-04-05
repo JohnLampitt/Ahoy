@@ -467,9 +467,11 @@ public sealed class KnowledgeSystem : IWorldSystem
 
         // Seed into actor's own holder (they know what they did)
         state.Knowledge.AddFact(new IndividualHolder(actorId), fact);
+        ApplyRelationshipConsequences(actorId, fact, state);
 
         // Seed into target's holder (they know what happened to them)
         state.Knowledge.AddFact(new IndividualHolder(targetId), fact);
+        ApplyRelationshipConsequences(targetId, fact, state);
 
         // Seed into port if either actor or target is at a port
         var actorPort = state.Individuals.TryGetValue(actorId, out var actorInd) ? actorInd.LocationPortId : null;
@@ -487,6 +489,67 @@ public sealed class KnowledgeSystem : IWorldSystem
     /// <summary>Resolve a ShipId to its captain's IndividualId, if any.</summary>
     private static IndividualId? GetCaptainId(ShipId shipId, WorldState state) =>
         state.Ships.TryGetValue(shipId, out var ship) ? ship.CaptainId : null;
+
+    // ---- 6C: Consequence Math ----
+
+    /// <summary>
+    /// When an IndividualActionClaim reaches an individual's knowledge, they adjust
+    /// their relationship with the actor (and optionally the beneficiary).
+    ///
+    /// Δ = P × S × C × M_trait
+    ///   P: ActionPolarity (+1/-1)
+    ///   S: Severity weight normalised to 0..1
+    ///   C: Fact confidence (distant rumours carry less weight)
+    ///   M_trait: Personality modifier
+    /// </summary>
+    private static void ApplyRelationshipConsequences(
+        IndividualId observerId, KnowledgeFact fact, WorldState state)
+    {
+        if (fact.Claim is not IndividualActionClaim action) return;
+        if (observerId == action.ActorId) return; // don't judge yourself
+
+        if (!state.Individuals.TryGetValue(observerId, out var observer)) return;
+
+        var p = (float)action.Polarity;
+        var s = (int)action.Severity / 100f;
+        var c = fact.Confidence;
+
+        // Personality modifier
+        float mTrait;
+        if (action.Polarity == ActionPolarity.Hostile)
+        {
+            // Loyal NPCs hold grudges harder
+            mTrait = 1.0f + (observer.Personality.Loyalty * 0.3f);
+        }
+        else
+        {
+            // Principled NPCs (negative Greed) value kind acts more
+            mTrait = 1.0f + (observer.Personality.Greed * -0.3f);
+        }
+
+        var delta = p * s * c * mTrait;
+
+        // Factional loyalty multiplier: if observer shares faction with target, they care more
+        if (observer.FactionId.HasValue && action.Polarity == ActionPolarity.Hostile)
+        {
+            if (state.Individuals.TryGetValue(action.TargetId, out var target)
+                && target.FactionId == observer.FactionId)
+            {
+                delta *= 1.5f; // "He attacked one of ours"
+            }
+        }
+
+        // Apply to actor
+        state.AdjustRelationship(observerId, action.ActorId, delta);
+
+        // Beneficiary gets half the delta
+        if (action.BeneficiaryId.HasValue && action.BeneficiaryId.Value != action.ActorId)
+            state.AdjustRelationship(observerId, action.BeneficiaryId.Value, delta * 0.5f);
+
+        // Also update legacy Individual.PlayerRelationship for backward compatibility
+        if (action.ActorId == state.Player.CaptainIndividualId)
+            observer.PlayerRelationship = Math.Clamp(observer.PlayerRelationship + delta, -100f, 100f);
+    }
 
     // ---- Propagation via ship arrivals ----
 
@@ -595,6 +658,10 @@ public sealed class KnowledgeSystem : IWorldSystem
                     OriginatingAgentId = fact.OriginatingAgentId,
                 };
                 AddAndSupersede(state.Knowledge, to, propagated, tick);
+
+                // 6C: Apply relationship consequences when gossip reaches an individual
+                if (to is IndividualHolder ih)
+                    ApplyRelationshipConsequences(ih.Individual, propagated, state);
             }
             else if (existing.Claim == fact.Claim)
             {
