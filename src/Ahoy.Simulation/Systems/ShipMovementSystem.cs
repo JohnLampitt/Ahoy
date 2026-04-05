@@ -829,11 +829,21 @@ public sealed class ShipMovementSystem : IWorldSystem
 
         if (hasCargo)
         {
-            // Score by: sell profit for current cargo / travel time
+            // Score by: estimated sell revenue / travel time.
+            // Marginal pricing: dumping large quantities depresses the price.
+            // The merchant mentally discounts the spot price based on volume:
+            // selling 1 unit = spot price, selling 50 = significantly less per unit.
             foreach (var (fact, claim) in knownPrices)
             {
                 if (!ship.Cargo.ContainsKey(claim.Good) || ship.Cargo[claim.Good] <= 0) continue;
-                var rawScore = claim.Price * fact.Confidence * ship.Cargo[claim.Good];
+                var cargoQty = ship.Cargo[claim.Good];
+
+                // Volume discount: average price = spot × (1 / (1 + qty/20))
+                // Selling 1: ~spot. Selling 20: ~50% of spot. Selling 50: ~29%.
+                var volumeDiscount = 1f / (1f + cargoQty / 20f);
+                var estimatedAvgPrice = claim.Price * fact.Confidence * volumeDiscount;
+                var rawScore = estimatedAvgPrice * cargoQty;
+
                 var portRegion = state.Ports.TryGetValue(claim.Port, out var p) ? p.RegionId : currentRegion;
                 var travelDays = Math.Max(0.5f, GetTravelDays(currentRegion, portRegion, state));
                 portScores.TryGetValue(claim.Port, out var existing);
@@ -866,12 +876,19 @@ public sealed class ShipMovementSystem : IWorldSystem
 
                     if (bestSell.Price <= buyPrice) continue;
 
-                    var margin = bestSell.Price - buyPrice;
+                    // Volume discount on the sell leg: carrying 30 units ≠ 30 × spot price
+                    const int EstimatedCargoQty = 30;
+                    var volumeDiscount = 1f / (1f + EstimatedCargoQty / 20f);
+                    var adjustedSellPrice = bestSell.Price * volumeDiscount;
+
+                    var margin = adjustedSellPrice - buyPrice;
+                    if (margin <= 0) continue;
+
                     var legTwoDays = Math.Max(0.5f, GetTravelDays(portRegion, bestSell.Region, state));
                     var roundTripDays = legOneDays + legTwoDays;
 
-                    // Score = margin per unit × estimated cargo capacity / total round-trip days
-                    var score = (margin * buyFact.Confidence * 30f) / roundTripDays;
+                    // Score = margin per unit × estimated cargo × confidence / round-trip days
+                    var score = (margin * buyFact.Confidence * EstimatedCargoQty) / roundTripDays;
                     bestRoundTripScore = Math.Max(bestRoundTripScore, score);
                 }
 

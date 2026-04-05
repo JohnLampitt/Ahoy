@@ -87,6 +87,66 @@ public sealed class EconomicProfile
         var maxMult = IsEssential(good) ? 10.0f : 5.0f;
         return (int)Math.Clamp(basePrice * multiplier, basePrice * minMult, basePrice * maxMult);
     }
+
+    /// <summary>
+    /// Calculate price at a hypothetical supply level (without mutating state).
+    /// Used for marginal pricing: price drops as the merchant sells more units.
+    /// </summary>
+    public int PriceAtSupply(TradeGood good, int hypotheticalSupply)
+    {
+        if (!BasePrice.TryGetValue(good, out var basePrice)) return 0;
+
+        var target = TargetSupply.GetValueOrDefault(good, Math.Max(1, Demand.GetValueOrDefault(good, 1)));
+        var ratio = (float)target / Math.Max(hypotheticalSupply, 1);
+
+        var exponent = IsEssential(good) && ratio > 1.0f ? 2.0f : 1.0f;
+        var multiplier = MathF.Pow(ratio, exponent);
+
+        foreach (var mod in ActiveModifiers)
+            if (mod.Good == good) multiplier *= mod.Multiplier;
+
+        var minMult = IsEssential(good) ? 0.10f : 0.20f;
+        var maxMult = IsEssential(good) ? 10.0f : 5.0f;
+        return (int)Math.Clamp(basePrice * multiplier, basePrice * minMult, basePrice * maxMult);
+    }
+
+    /// <summary>
+    /// Calculate total revenue from selling qty units, accounting for price
+    /// declining as supply increases with each unit sold. Sells in batches of 5
+    /// for efficiency. Returns (totalRevenue, actualQtySold) — may sell less
+    /// than requested if price drops to floor.
+    /// </summary>
+    public (int Revenue, int QtySold) CalculateBulkSellRevenue(TradeGood good, int qty)
+    {
+        var currentSupply = Supply.GetValueOrDefault(good, 0);
+        var totalRevenue = 0;
+        var sold = 0;
+        const int BatchSize = 5;
+
+        while (sold < qty)
+        {
+            var batchQty = Math.Min(BatchSize, qty - sold);
+            var priceAtCurrentLevel = PriceAtSupply(good, currentSupply + sold);
+            if (priceAtCurrentLevel <= 0) break;
+
+            totalRevenue += priceAtCurrentLevel * batchQty;
+            sold += batchQty;
+        }
+
+        return (totalRevenue, sold);
+    }
+
+    /// <summary>
+    /// Estimate the average price per unit if selling qty units at this port.
+    /// Used by merchant routing to evaluate destinations realistically —
+    /// dumping 50 units won't all sell at the current spot price.
+    /// </summary>
+    public float EstimateAverageSellPrice(TradeGood good, int qty)
+    {
+        if (qty <= 0) return 0;
+        var (revenue, sold) = CalculateBulkSellRevenue(good, qty);
+        return sold > 0 ? (float)revenue / sold : 0;
+    }
 }
 
 public sealed class PriceModifier

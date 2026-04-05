@@ -325,42 +325,58 @@ public sealed class EconomySystem : IWorldSystem
     {
         var economy = port.Economy;
 
-        // SELL cargo — port pays from its treasury (zero-sum)
+        // SELL cargo — marginal pricing (price drops as supply increases with each batch)
+        // Port pays from its treasury (zero-sum)
         foreach (var (good, qty) in ship.Cargo.ToList())
         {
             var demand = economy.Demand.GetValueOrDefault(good);
             if (demand <= 0) continue;
+            if (port.Treasury <= 0) continue; // broke port
 
             var sellQty = Math.Min(qty, demand);
-            var price = economy.EffectivePrice(good);
-            var totalCost = price * sellQty;
+
+            // Calculate total revenue with marginal pricing
+            var (totalRevenue, actualSold) = economy.CalculateBulkSellRevenue(good, sellQty);
 
             // Port can only pay what it has
-            if (port.Treasury < totalCost)
+            if (totalRevenue > port.Treasury)
             {
-                if (port.Treasury <= 0) continue; // broke port — merchant refuses
-                sellQty = Math.Max(1, port.Treasury / price);
-                totalCost = price * sellQty;
+                // Sell fewer units until within treasury budget
+                totalRevenue = 0;
+                actualSold = 0;
+                var currentSupply = economy.Supply.GetValueOrDefault(good, 0);
+                const int batch = 5;
+                while (actualSold < sellQty)
+                {
+                    var batchQty = Math.Min(batch, sellQty - actualSold);
+                    var batchPrice = economy.PriceAtSupply(good, currentSupply + actualSold);
+                    var batchCost = batchPrice * batchQty;
+                    if (totalRevenue + batchCost > port.Treasury) break;
+                    totalRevenue += batchCost;
+                    actualSold += batchQty;
+                }
+                if (actualSold <= 0) continue;
             }
 
-            ship.Cargo[good] -= sellQty;
+            ship.Cargo[good] -= actualSold;
             if (ship.Cargo[good] <= 0) ship.Cargo.Remove(good);
 
-            economy.Supply[good] = economy.Supply.GetValueOrDefault(good) + sellQty;
-            economy.Demand[good] = Math.Max(0, economy.Demand.GetValueOrDefault(good) - sellQty);
+            economy.Supply[good] = economy.Supply.GetValueOrDefault(good) + actualSold;
+            economy.Demand[good] = Math.Max(0, economy.Demand.GetValueOrDefault(good) - actualSold);
 
             // Zero-sum transfer: port treasury → ship + captain
-            port.Treasury -= totalCost;
+            port.Treasury -= totalRevenue;
             var captainCut = 0;
             if (ship.CaptainId.HasValue
                 && state.Individuals.TryGetValue(ship.CaptainId.Value, out var captain))
             {
-                captainCut = (int)(totalCost * CaptainIncomeFraction);
+                captainCut = (int)(totalRevenue * CaptainIncomeFraction);
                 captain.CurrentGold += captainCut;
             }
-            ship.GoldOnBoard += totalCost - captainCut; // ship gets remainder
+            ship.GoldOnBoard += totalRevenue - captainCut;
 
-            events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, sellQty, price, false), lod);
+            var avgPrice = actualSold > 0 ? totalRevenue / actualSold : 0;
+            events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, actualSold, avgPrice, false), lod);
         }
 
         // BUY goods using knowledge-driven arbitrage.
