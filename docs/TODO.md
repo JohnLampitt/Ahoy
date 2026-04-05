@@ -54,6 +54,24 @@ the system it affects, the symptom, and the intended fix.
 - **Workaround:** Mean-reversion band-aid `(50 - prosperity) * 0.005` prevents
   total collapse but masks the structural deficit.
 
+### Export Cap Is a Hack — Needs Physical Convoy Model
+- **System:** EconomySystem / `TickExports`
+- **Symptom:** Export hubs are capped at 3 units per good per tick via a hard
+  constant `MaxExportPerGoodPerTick`. This prevents gold hyperinflation but
+  is an arbitrary throttle with no simulation backing.
+- **Problem:** The cap doesn't respond to world conditions — a blockaded hub
+  still exports 3 units/tick because the cap is checked against local supply,
+  not shipping lane safety. A booming hub with massive surplus can't export
+  more than a struggling one.
+- **Fix:** Replace the hard cap with a physical convoy system. Export hubs
+  load surplus goods onto faction ships that physically sail to an off-map
+  "Europe" waypoint. Gold returns on the next convoy. Export rate is naturally
+  limited by: number of available ships, travel time, pirate interception.
+  Blockading a hub's shipping lanes physically prevents exports.
+- **Interim:** The 3-unit cap is tuned to prevent inflation at current
+  European price levels (~50g for Gold, 8g for Sugar). If prices or port
+  count change, this needs retuning.
+
 ### Remove InjectExternalFood Once Export Mint Sustains Population
 - **System:** EconomySystem / `InjectExternalFood`
 - **Symptom:** Food is magically injected into ports each tick with no economic
