@@ -30,6 +30,12 @@ public sealed class Faction
     // --- Relationships with other factions (-100..+100) ---
     public Dictionary<FactionId, float> Relationships { get; } = new();
 
+    /// <summary>
+    /// Discrete war state. Prevents float-oscillation around the hostility threshold.
+    /// Requires a formal Peace Treaty event to clear. (Crisis 6: Colonial War)
+    /// </summary>
+    public HashSet<FactionId> AtWarWith { get; } = new();
+
     // --- Ports and territories ---
     public List<PortId> ControlledPorts { get; } = new();
     public List<RegionId> ClaimedRegions { get; } = new();
@@ -79,3 +85,5 @@ public record NegotiateTreaty(FactionId TargetFaction) : FactionGoal;
 public record RaidShippingLane(RegionId TargetRegion) : FactionGoal;   // Pirate-specific
 public record EstablishHaven(PortId TargetPort) : FactionGoal;          // Pirate-specific
 public record EspionageGoal : FactionGoal;              // drives intelligence operations
+public record DeclareWar(FactionId TargetFaction) : FactionGoal;    // Crisis 6: triggers AtWarWith
+public record SeekPeace(FactionId TargetFaction) : FactionGoal;     // Crisis 6: ends war via treaty

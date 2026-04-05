@@ -17,6 +17,24 @@ public record FulfillContractGoal(
     Guid Id, IndividualId NpcId,
     ContractClaim Contract) : NpcGoal(Id, NpcId);
 
+/// <summary>Demand ransom for a captured VIP. Route to victim's faction port, demand gold. (Crisis 1)</summary>
+public record RansomGoal(
+    Guid Id, IndividualId NpcId,
+    IndividualId CaptiveId,
+    FactionId TargetFactionId,
+    int DemandGold) : NpcGoal(Id, NpcId);
+
+/// <summary>Extort a target using held secret knowledge. Route to target's port, demand payment. (Crisis 5, 6D)</summary>
+public record ExtortGoal(
+    Guid Id, IndividualId NpcId,
+    IndividualId TargetId,
+    KnowledgeFactId LeverageFactId) : NpcGoal(Id, NpcId);
+
+/// <summary>Patrol a region — loiter and intercept enemy ships. (Crisis 3, 6)</summary>
+public record PatrolRegionGoal(
+    Guid Id, IndividualId NpcId,
+    RegionId Region) : NpcGoal(Id, NpcId);
+
 // Future goal types:
 // public record TradeGoal(Guid Id, IndividualId NpcId, PortId TargetPort) : NpcGoal(Id, NpcId);
 // public record InvestigateGoal(Guid Id, IndividualId NpcId, string SubjectKey) : NpcGoal(Id, NpcId);

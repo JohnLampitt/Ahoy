@@ -55,4 +55,8 @@ public sealed class Individual
 
     // --- Wealth ---
     public int CurrentGold { get; set; }
+
+    // --- Captivity (Crisis 1: VIP Abduction) ---
+    /// <summary>Non-null when this individual is held captive by another.</summary>
+    public IndividualId? CaptorId { get; set; }
 }

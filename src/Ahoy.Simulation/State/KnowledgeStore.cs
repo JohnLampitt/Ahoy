@@ -19,6 +19,7 @@ public enum ContractConditionType
     TargetDestroyed,
     TargetDead,
     GoodsDelivered,
+    TargetRescued,    // Crisis 1: VIP abduction resolution
 }
 
 // ---- Deed ledger enums (6A) ----
@@ -98,6 +99,14 @@ public record PardonClaim(
     IndividualId GrantedBy,
     FactionId Faction,
     IndividualId PardonedActor) : KnowledgeClaim;
+
+/// <summary>
+/// What an actor believes about a port's current condition (epidemic, blockade, etc.).
+/// Propagates as gossip — merchants use this to avoid dangerous ports (Crisis 2, 3).
+/// </summary>
+public record PortConditionClaim(
+    PortId Port,
+    PortConditionFlags Condition) : KnowledgeClaim;
 
 public record IndividualActionClaim(
     IndividualId ActorId,
@@ -213,6 +222,7 @@ public sealed class KnowledgeFact
         OceanPoiClaim c                 => $"Poi:{c.Poi.Value}",
         IndividualAllegianceClaim c     => $"Allegiance:{c.Individual.Value}",
         PardonClaim c                  => $"Pardon:{c.Faction.Value}:{c.PardonedActor.Value}",
+        PortConditionClaim c           => $"PortCondition:{c.Port.Value}:{c.Condition}",
         IndividualActionClaim c        => $"Action:{c.ActorId.Value}:{c.TargetId.Value}:{c.Context.GetHashCode():X8}",
         _                               => claim.GetType().Name,
     };

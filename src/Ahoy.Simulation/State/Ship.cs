@@ -82,4 +82,15 @@ public sealed class Ship
     // --- Flags ---
     public bool IsPlayerShip { get; init; }
     public bool IsPirate { get; set; }
+
+    // --- Crisis state ---
+    /// <summary>True when crew carries infectious disease. Spreads to ports on dock. (Crisis 2: Epidemic)</summary>
+    public bool HasInfectedCrew { get; set; }
+
+    /// <summary>
+    /// Physical packet of secret documents carried by this ship. References a KnowledgeFact
+    /// (typically a FactionIntentionClaim). Transfers on boarding/sinking. Kept in the
+    /// knowledge economy, not the commodity loop. (Crisis 5: Intelligence Compromise)
+    /// </summary>
+    public KnowledgeFactId? CarriedIntelPackage { get; set; }
 }
