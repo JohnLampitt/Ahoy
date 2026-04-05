@@ -68,7 +68,7 @@ the system it affects, the symptom, and the intended fix.
   (~20% of current rate) representing local food production that doesn't
   require gold or trade. This is economically free but represents subsistence.
 
-### Gold Inflation: Ports Have No Treasury
+### ~~Gold Inflation: Ports Have No Treasury~~ (RESOLVED — Group 10)
 - **System:** EconomySystem / `ExecuteMerchantTrade`
 - **Symptom:** Gold is created from nothing when merchants sell goods — there's no
   check that the port can afford to pay. With inelastic essential pricing (up to 10×),
