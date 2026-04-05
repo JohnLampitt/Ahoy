@@ -44,7 +44,7 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
                 : BaseMortality;
             if (_rng.NextDouble() < chance)
             {
-                individual.IsAlive = false;
+                individual.Kill();
                 var lod = individual.LocationPortId.HasValue
                     && state.Ports.TryGetValue(individual.LocationPortId.Value, out var p)
                     && state.Regions.TryGetValue(p.RegionId, out _)
@@ -82,8 +82,7 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
                 if (PickTourDestination(homePort, individual, state) is not { } dest)
                     continue;
 
-                individual.LocationPortId     = dest;
-                individual.TourTicksRemaining = _rng.Next(TourMinTicks, TourMaxTicks + 1);
+                individual.BeginTour(dest, _rng.Next(TourMinTicks, TourMaxTicks + 1));
                 events.Emit(
                     new IndividualMoved(state.Date, SimulationLod.Local,
                         individual.Id, homePort, dest),
@@ -92,13 +91,11 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
             else
             {
                 // On tour — count down
-                individual.TourTicksRemaining--;
-                if (individual.TourTicksRemaining > 0) continue;
+                if (!individual.TickTour()) continue;
 
                 // Tour complete — return home
                 var fromPort = individual.LocationPortId ?? homePort;
-                individual.LocationPortId     = homePort;
-                individual.TourTicksRemaining = null;
+                individual.ReturnHome();
                 events.Emit(
                     new IndividualMoved(state.Date, SimulationLod.Local,
                         individual.Id, fromPort, homePort),

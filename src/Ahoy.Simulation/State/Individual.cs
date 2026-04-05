@@ -15,13 +15,39 @@ public sealed class Individual
     public FactionId? FactionId { get; set; }
 
     /// <summary>Current port they're based at (null = at sea / unknown).</summary>
-    public PortId? LocationPortId { get; set; }
+    private PortId? _locationPortId;
+    public PortId? LocationPortId { get => _locationPortId; init => _locationPortId = value; }
 
     /// <summary>The port this individual calls home and returns to after tours. Null for nomadic individuals (pirates, brokers).</summary>
     public PortId? HomePortId { get; set; }
 
     /// <summary>Non-null while on an inspection/diplomatic tour. Counts down each tick; at 0 the individual returns home.</summary>
-    public int? TourTicksRemaining { get; set; }
+    public int? TourTicksRemaining { get; private set; }
+
+    /// <summary>Start a tour to the given port for the given duration.</summary>
+    public void BeginTour(PortId destination, int ticks)
+    {
+        _locationPortId = destination;
+        TourTicksRemaining = ticks;
+    }
+
+    /// <summary>Return home from a tour. Resets tour timer.</summary>
+    public void ReturnHome()
+    {
+        _locationPortId = HomePortId;
+        TourTicksRemaining = null;
+    }
+
+    /// <summary>Decrement tour timer. Returns true if tour completed this tick.</summary>
+    public bool TickTour()
+    {
+        if (!TourTicksRemaining.HasValue) return false;
+        TourTicksRemaining--;
+        return TourTicksRemaining <= 0;
+    }
+
+    /// <summary>Place this individual at a port (world init, not a tour).</summary>
+    public void SetLocation(PortId? portId) => _locationPortId = portId;
 
     /// <summary>
     /// Authority 0–100. Governors with high authority enforce laws effectively.
@@ -36,7 +62,15 @@ public sealed class Individual
     public float PlayerRelationship { get; set; }
 
     // --- Flags ---
-    public bool IsAlive { get; set; } = true;
+    private bool _isAlive = true;
+    public bool IsAlive { get => _isAlive; init => _isAlive = value; }
+
+    /// <summary>Kill this individual. Clears captivity state.</summary>
+    public void Kill()
+    {
+        _isAlive = false;
+        CaptorId = null;
+    }
     public bool IsPlayerKnown { get; set; }
     public bool IsCompromised { get; set; }
 

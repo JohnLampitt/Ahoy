@@ -35,7 +35,7 @@ public class ChaosMonkeyTests
             .Where(i => i.Role == IndividualRole.Governor && i.IsAlive)
             .ToList();
         _output.WriteLine($"Killing {governors.Count} governors");
-        foreach (var gov in governors) gov.IsAlive = false;
+        foreach (var gov in governors) gov.Kill();
 
         // Run for 500 more ticks
         for (int i = 0; i < 500; i++) engine.Tick();

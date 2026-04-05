@@ -36,6 +36,24 @@ public sealed class Faction
     /// </summary>
     public HashSet<FactionId> AtWarWith { get; } = new();
 
+    /// <summary>Declare war on another faction. Sets both sides' AtWarWith and clamps relationship.</summary>
+    public void DeclareWarOn(FactionId other, Faction otherFaction)
+    {
+        AtWarWith.Add(other);
+        otherFaction.AtWarWith.Add(Id);
+        Relationships[other] = Math.Min(Relationships.GetValueOrDefault(other), -80f);
+        otherFaction.Relationships[Id] = Math.Min(otherFaction.Relationships.GetValueOrDefault(Id), -80f);
+    }
+
+    /// <summary>End war with another faction. Clears both sides' AtWarWith and resets relationship to -20.</summary>
+    public void MakePeaceWith(FactionId other, Faction otherFaction)
+    {
+        AtWarWith.Remove(other);
+        otherFaction.AtWarWith.Remove(Id);
+        Relationships[other] = -20f;
+        otherFaction.Relationships[Id] = -20f;
+    }
+
     // --- Ports and territories ---
     public List<PortId> ControlledPorts { get; } = new();
     public List<RegionId> ClaimedRegions { get; } = new();

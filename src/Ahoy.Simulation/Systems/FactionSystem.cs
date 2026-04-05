@@ -85,11 +85,9 @@ public sealed class FactionSystem : IWorldSystem
             if (faction.Relationships.TryGetValue(goal.TargetFaction, out var rel) && rel > -80f)
                 continue;
 
-            faction.AtWarWith.Add(goal.TargetFaction);
-
-            // Reciprocal — the target is also at war with us
-            if (state.Factions.TryGetValue(goal.TargetFaction, out var targetFaction))
-                targetFaction.AtWarWith.Add(factionId);
+            if (!state.Factions.TryGetValue(goal.TargetFaction, out var targetFaction))
+                continue;
+            faction.DeclareWarOn(goal.TargetFaction, targetFaction);
 
             // Seed war intention at Public sensitivity — everyone hears fast
             var warFact = new KnowledgeFact
@@ -116,12 +114,7 @@ public sealed class FactionSystem : IWorldSystem
             if (!targetFaction2.ActiveGoals.Any(g => g is SeekPeace sp && sp.TargetFaction == factionId))
                 continue;
 
-            faction.AtWarWith.Remove(goal.TargetFaction);
-            targetFaction2.AtWarWith.Remove(factionId);
-
-            // Reset relationship to neutral-ish
-            faction.Relationships[goal.TargetFaction] = -20f; // still tense, not friendly
-            targetFaction2.Relationships[factionId] = -20f;
+            faction.MakePeaceWith(goal.TargetFaction, targetFaction2);
         }
     }
 
@@ -693,7 +686,7 @@ public sealed class FactionSystem : IWorldSystem
                 LocationPortId = burned.LocationPortId ?? burned.HomePortId,
                 HomePortId = burned.HomePortId,
             };
-            replacement.IsAlive = true;
+            // IsAlive defaults to true — no need to set explicitly
 
             // 10% chance: replacement is secretly loyal to a rival colonial power
             if (_rng.NextSingle() < 0.10f
@@ -713,7 +706,7 @@ public sealed class FactionSystem : IWorldSystem
 
             state.Individuals[replacement.Id] = replacement;
 
-            burned.IsAlive = false;
+            burned.Kill();
 
             events.Emit(new AgentReplaced(state.Date, SimulationLod.Local,
                 agentId, replacement.Id, burned.FactionId.Value), SimulationLod.Local);
