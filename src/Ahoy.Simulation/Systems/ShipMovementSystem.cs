@@ -436,7 +436,8 @@ public sealed class ShipMovementSystem : IWorldSystem
         // Crew gossip (ShipHolder) is the navigator's log — captains consult this.
         var accessiblePortIds = GetAccessiblePortIds(currentRegion, state);
         var knownPrices = GetKnownPrices(agentHolder, ship, state, accessiblePortIds);
-        var best = ScoreMerchantDestination(knownPrices, ship, accessiblePortIds);
+        var dangerousPorts = GetKnownDangerousPorts(agentHolder, ship, state);
+        var best = ScoreMerchantDestination(knownPrices, ship, accessiblePortIds, dangerousPorts);
 
         // Fallback chain: HomePort (if stranded) → random accessible port
         PortId? homePort = null;
@@ -631,6 +632,53 @@ public sealed class ShipMovementSystem : IWorldSystem
     }
 
     /// <summary>
+    /// Collect ports the NPC knows are dangerous (epidemic, blockaded, at war).
+    /// Merchants avoid these ports — organic quarantine and embargo behaviour.
+    /// </summary>
+    private static HashSet<PortId> GetKnownDangerousPorts(
+        KnowledgeHolderId agentHolder, Ship ship, WorldState state)
+    {
+        var dangerous = new HashSet<PortId>();
+        var holders = new List<KnowledgeHolderId> { agentHolder };
+        if (agentHolder is not ShipHolder)
+            holders.Add(new ShipHolder(ship.Id));
+
+        foreach (var holder in holders)
+        {
+            foreach (var fact in state.Knowledge.GetFacts(holder))
+            {
+                if (fact.IsSuperseded || fact.Confidence < 0.30f) continue;
+
+                if (fact.Claim is PortConditionClaim pcc
+                    && (pcc.Condition.HasFlag(PortConditionFlags.Plague)
+                        || pcc.Condition.HasFlag(PortConditionFlags.Blockaded)))
+                {
+                    dangerous.Add(pcc.Port);
+                }
+
+                // Also check RouteHazardClaim for blockade-like hazards
+                // (merchants already avoid these via price scoring, but this adds direct avoidance)
+            }
+        }
+
+        // Additionally: avoid ports controlled by factions at war with the ship's owner
+        if (ship.OwnerFactionId.HasValue
+            && state.Factions.TryGetValue(ship.OwnerFactionId.Value, out var shipFaction))
+        {
+            foreach (var port in state.Ports.Values)
+            {
+                if (port.ControllingFactionId.HasValue
+                    && shipFaction.AtWarWith.Contains(port.ControllingFactionId.Value))
+                {
+                    dangerous.Add(port.Id);
+                }
+            }
+        }
+
+        return dangerous;
+    }
+
+    /// <summary>
     /// Score candidate ports by expected trade margin.
     /// If ship has cargo: find ports with highest known sell prices for carried goods.
     /// If ship is empty: find ports with lowest known buy prices (buying opportunity).
@@ -639,8 +687,14 @@ public sealed class ShipMovementSystem : IWorldSystem
     private static PortId? ScoreMerchantDestination(
         List<(KnowledgeFact Fact, PortPriceClaim Claim)> knownPrices,
         Ship ship,
-        HashSet<PortId> accessiblePortIds)
+        HashSet<PortId> accessiblePortIds,
+        HashSet<PortId>? dangerousPorts = null)
     {
+        if (knownPrices.Count == 0) return null;
+
+        // Filter out known dangerous ports (epidemic, blockade) — merchants avoid them
+        if (dangerousPorts is { Count: > 0 })
+            knownPrices = knownPrices.Where(x => !dangerousPorts.Contains(x.Claim.Port)).ToList();
         if (knownPrices.Count == 0) return null;
 
         var hasCargo = ship.Cargo.Any(kv => kv.Value > 0);

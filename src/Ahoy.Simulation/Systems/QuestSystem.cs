@@ -443,12 +443,102 @@ public sealed class QuestSystem : IWorldSystem
     private static void TickActivePursuit(IndividualId npcId, GoalPursuit pursuit,
         WorldState state, SimulationContext context, IEventEmitter events)
     {
-        if (pursuit.ActiveGoal is not FulfillContractGoal contractGoal) return;
         if (!state.Individuals.TryGetValue(npcId, out var npc) || !npc.IsAlive)
         {
             pursuit.State = PursuitState.Abandoned;
             return;
         }
+
+        // Dispatch by goal type
+        switch (pursuit.ActiveGoal)
+        {
+            case FulfillContractGoal contractGoal:
+                TickContractPursuit(npcId, npc, contractGoal, pursuit, state, context, events);
+                break;
+
+            case PatrolRegionGoal patrolGoal:
+                TickPatrolPursuit(npcId, npc, patrolGoal, pursuit, state);
+                break;
+
+            case RansomGoal ransomGoal:
+                TickRansomPursuit(npcId, npc, ransomGoal, pursuit, state, context, events);
+                break;
+
+            // ExtortGoal deferred
+        }
+    }
+
+    private static void TickPatrolPursuit(IndividualId npcId, Individual npc,
+        PatrolRegionGoal goal, GoalPursuit pursuit, WorldState state)
+    {
+        var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
+        if (ship is null) { pursuit.State = PursuitState.Abandoned; return; }
+
+        var currentRegion = state.GetShipRegion(ship.Id);
+
+        // Route toward patrol region if not already there
+        if (currentRegion != goal.Region)
+        {
+            // Find a port in the patrol region to route to
+            var patrolPort = state.Ports.Values.FirstOrDefault(p => p.RegionId == goal.Region);
+            if (patrolPort is not null)
+                ship.Route = new PortRoute(patrolPort.Id);
+            return;
+        }
+
+        // In the patrol region — loiter. If docked, depart to sea. If at sea, stay.
+        if (ship.Location is AtPort && ship.TicksDockedAtCurrentPort >= 2)
+        {
+            // Depart — pick a random adjacent port to keep moving
+            var adjacentPort = state.Ports.Values
+                .Where(p => p.RegionId == goal.Region && p.Id != (ship.Location as AtPort)!.Port)
+                .FirstOrDefault();
+            if (adjacentPort is not null)
+                ship.Route = new PortRoute(adjacentPort.Id);
+        }
+
+        // Patrol continues until war ends or goal abandoned (30 tick limit)
+        if (pursuit.ActivatedOnTick + 30 < state.Date.DaysSinceStart)
+            pursuit.State = PursuitState.Completed;
+    }
+
+    private static void TickRansomPursuit(IndividualId npcId, Individual npc,
+        RansomGoal goal, GoalPursuit pursuit, WorldState state,
+        SimulationContext context, IEventEmitter events)
+    {
+        var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
+        if (ship is null) { pursuit.State = PursuitState.Abandoned; return; }
+
+        // Route toward a port controlled by the target faction
+        if (ship.Route is null)
+        {
+            var targetPort = state.Ports.Values
+                .FirstOrDefault(p => p.ControllingFactionId == goal.TargetFactionId);
+            if (targetPort is not null)
+                ship.Route = new PortRoute(targetPort.Id);
+            else
+            {
+                pursuit.State = PursuitState.Stalled;
+                return;
+            }
+        }
+
+        // If docked at target faction's port — ransom demand is "in progress"
+        // Resolution happens via the contract system (TargetRescued condition)
+        // For now, the ransom goal auto-completes after 20 ticks (NPC collected ransom or gave up)
+        if (pursuit.ActivatedOnTick + 20 < context.TickNumber)
+        {
+            // Ransom timeout — release captive
+            if (state.Individuals.TryGetValue(goal.CaptiveId, out var captive))
+                captive.CaptorId = null;
+            pursuit.State = PursuitState.Abandoned;
+        }
+    }
+
+    private static void TickContractPursuit(IndividualId npcId, Individual npc,
+        FulfillContractGoal contractGoal, GoalPursuit pursuit,
+        WorldState state, SimulationContext context, IEventEmitter events)
+    {
 
         var contract = contractGoal.Contract;
         var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
