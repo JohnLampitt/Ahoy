@@ -40,6 +40,8 @@ src/
   Ahoy.Simulation.LlmDecisions/  # LLamaSharp stub (optional, not wired yet)
   Ahoy.WorldData/             # CaribbeanWorldDefinition — hand-crafted world content
   Ahoy.Console/               # Text REPL observation harness
+tests/
+  Ahoy.Simulation.Tests/       # xUnit test project — ScenarioBuilder, InvariantValidator, Telemetry
 docs/
   GDD.md                      # Game Design Document
   SDD-*.md                    # System Design Documents (one per system)
@@ -50,7 +52,7 @@ docs/
 - **Tick = 1 day** in normal play
 - **LOD = knowledge fidelity**: Local (player's region) / Regional (adjacent) / Distant
 - **WorldState is pure data** — all mutation happens inside `IWorldSystem.Tick()`
-- **6 systems run in order**: Weather → ShipMovement → Economy → Faction → EventPropagation → Knowledge
+- **8 systems run in order**: Weather → ShipMovement → Economy → Faction → IndividualLifecycle → EventPropagation → Knowledge → Quest
 - **Actor decisions**: sync `RuleBasedDecisionProvider` (always available) + async LLM queue (optional)
 - **Events carry `SourceLod`** which sets `BaseConfidence` of derived KnowledgeFacts
 - **No serialisation yet** — world is recreated from `CaribbeanWorldDefinition` each run
