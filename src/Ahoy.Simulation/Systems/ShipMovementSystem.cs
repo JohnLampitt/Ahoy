@@ -437,7 +437,7 @@ public sealed class ShipMovementSystem : IWorldSystem
         var accessiblePortIds = GetAccessiblePortIds(currentRegion, state);
         var knownPrices = GetKnownPrices(agentHolder, ship, state, accessiblePortIds);
         var dangerousPorts = GetKnownDangerousPorts(agentHolder, ship, state);
-        var best = ScoreMerchantDestination(knownPrices, ship, accessiblePortIds, dangerousPorts);
+        var best = ScoreMerchantDestination(knownPrices, ship, accessiblePortIds, currentRegion, state, dangerousPorts);
 
         // Fallback chain: HomePort (if stranded) → random accessible port
         PortId? homePort = null;
@@ -692,10 +692,17 @@ public sealed class ShipMovementSystem : IWorldSystem
     /// If ship is empty: find ports with lowest known buy prices (buying opportunity).
     /// Falls back to highest-confidence known port if no margin data available.
     /// </summary>
+    /// <summary>
+    /// Score candidate ports by expected profit-per-day.
+    /// Phase 4: Divides margin by travel time so distant high-value crises
+    /// outscore nearby low-value routine runs.
+    /// </summary>
     private static PortId? ScoreMerchantDestination(
         List<(KnowledgeFact Fact, PortPriceClaim Claim)> knownPrices,
         Ship ship,
         HashSet<PortId> accessiblePortIds,
+        RegionId currentRegion,
+        WorldState state,
         HashSet<PortId>? dangerousPorts = null)
     {
         if (knownPrices.Count == 0) return null;
@@ -706,40 +713,40 @@ public sealed class ShipMovementSystem : IWorldSystem
         if (knownPrices.Count == 0) return null;
 
         var hasCargo = ship.Cargo.Any(kv => kv.Value > 0);
+        var portScores = new Dictionary<PortId, float>();
 
         if (hasCargo)
         {
-            // Score ports by: sum of (known sell price × confidence) for goods we carry
-            var portScores = new Dictionary<PortId, float>();
+            // Score ports by: profit-per-day for goods we carry
             foreach (var (fact, claim) in knownPrices)
             {
                 if (!ship.Cargo.ContainsKey(claim.Good) || ship.Cargo[claim.Good] <= 0) continue;
-                var score = claim.Price * fact.Confidence * ship.Cargo[claim.Good];
+                var rawScore = claim.Price * fact.Confidence * ship.Cargo[claim.Good];
+                var portRegion = state.Ports.TryGetValue(claim.Port, out var p) ? p.RegionId : currentRegion;
+                // Floor 0.5f for intra-region: strongly prioritise nearby crises
+                var travelDays = Math.Max(0.5f, GetTravelDays(currentRegion, portRegion, state));
                 portScores.TryGetValue(claim.Port, out var existing);
-                portScores[claim.Port] = existing + score;
+                portScores[claim.Port] = existing + rawScore / travelDays;
             }
-
-            if (portScores.Count > 0)
-                return portScores.MaxBy(kv => kv.Value).Key;
         }
         else
         {
-            // No cargo — route toward port with lowest known prices (buying opportunity).
-            // Score = inverse price weighted by confidence (lower price = better opportunity).
-            var portScores = new Dictionary<PortId, float>();
+            // No cargo — route toward port with lowest known prices / travel time
             foreach (var (fact, claim) in knownPrices)
             {
                 if (claim.Price <= 0) continue;
-                var score = fact.Confidence / claim.Price;
+                var portRegion = state.Ports.TryGetValue(claim.Port, out var p) ? p.RegionId : currentRegion;
+                var travelDays = Math.Max(0.5f, GetTravelDays(currentRegion, portRegion, state));
+                var score = (fact.Confidence / claim.Price) / travelDays;
                 portScores.TryGetValue(claim.Port, out var existing);
                 portScores[claim.Port] = existing + score;
             }
-
-            if (portScores.Count > 0)
-                return portScores.MaxBy(kv => kv.Value).Key;
         }
 
-        // Fallback: highest-confidence known port (original behaviour)
+        if (portScores.Count > 0)
+            return portScores.MaxBy(kv => kv.Value).Key;
+
+        // Fallback: highest-confidence known port
         return knownPrices
             .OrderByDescending(x => x.Fact.Confidence)
             .Select(x => (PortId?)x.Claim.Port)

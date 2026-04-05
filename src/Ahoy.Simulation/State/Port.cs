@@ -25,8 +25,19 @@ public sealed class Port
     // --- Port state intermediaries (cascade targets for EventPropagation) ---
 
     /// <summary>
-    /// Overall prosperity 0–100. Drives trade volume, price baselines and
-    /// faction income. Key target for economic propagation rules.
+    /// Resident population. Drives consumption (TargetSupply), production capacity,
+    /// and tax revenue. Floor: 100 (abandoned outpost). No ceiling — Malthusian Trap
+    /// provides natural carrying capacity.
+    /// </summary>
+    public int Population { get; private set; } = 1000;
+
+    public void AdjustPopulation(int delta)
+        => Population = Math.Max(100, Population + delta);
+
+    /// <summary>
+    /// Overall prosperity 0–100. Drives production efficiency and trade volume.
+    /// Separate from Population: a recently starved port can have low population
+    /// but recovering prosperity as food arrives.
     /// </summary>
     public float Prosperity { get; set; } = 50f;
 

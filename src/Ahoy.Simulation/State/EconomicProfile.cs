@@ -5,16 +5,23 @@ namespace Ahoy.Simulation.State;
 /// <summary>Describes what a port produces, consumes, and how prices shift over time.</summary>
 public sealed class EconomicProfile
 {
-    /// <summary>Units produced per tick at baseline.</summary>
+    /// <summary>Units produced per tick at baseline (per 1000 population at 100% prosperity).</summary>
     public Dictionary<TradeGood, int> BaseProduction { get; } = new();
 
-    /// <summary>Units consumed per tick at baseline.</summary>
+    /// <summary>Non-essential goods consumed per tick at baseline (per 1000 population).</summary>
     public Dictionary<TradeGood, int> BaseConsumption { get; } = new();
 
     /// <summary>Current supply on-hand.</summary>
     public Dictionary<TradeGood, int> Supply { get; } = new();
 
-    /// <summary>Current outstanding demand.</summary>
+    /// <summary>
+    /// How much of each good this port needs per tick to sustain its population.
+    /// Recalculated each tick by EconomySystem from population size.
+    /// Food: 1 unit per 100 pop. Medicine: 1 unit per 500 pop. Others: BaseConsumption scaled.
+    /// </summary>
+    public Dictionary<TradeGood, int> TargetSupply { get; } = new();
+
+    /// <summary>Current outstanding demand (legacy — being replaced by TargetSupply for essentials).</summary>
     public Dictionary<TradeGood, int> Demand { get; } = new();
 
     /// <summary>Base prices in gold per unit before supply/demand adjustment.</summary>
@@ -23,27 +30,35 @@ public sealed class EconomicProfile
     /// <summary>Active price modifiers applied on top of the supply/demand formula.</summary>
     public List<PriceModifier> ActiveModifiers { get; } = new();
 
+    /// <summary>Essential goods scale non-linearly when scarce — people pay everything they have.</summary>
+    public static bool IsEssential(TradeGood good) =>
+        good is TradeGood.Food or TradeGood.Medicine or TradeGood.Water;
+
     /// <summary>
     /// Calculates the current effective price for a good.
-    /// Formula: BasePrice × (Demand / max(Supply, 1)), clamped 20%–500%.
+    /// Essentials: BasePrice × (TargetSupply / Supply)^2 — exponential scarcity.
+    /// Luxuries:   BasePrice × (TargetSupply / Supply)^1 — linear scarcity.
     /// </summary>
     public int EffectivePrice(TradeGood good)
     {
         if (!BasePrice.TryGetValue(good, out var basePrice)) return 0;
 
         var supply = Supply.GetValueOrDefault(good, 0);
-        var demand = Demand.GetValueOrDefault(good, 0);
-        var ratio = (float)demand / Math.Max(supply, 1);
-        var price = basePrice * ratio;
+        var target = TargetSupply.GetValueOrDefault(good, Math.Max(1, Demand.GetValueOrDefault(good, 1)));
+        var ratio = (float)target / Math.Max(supply, 1);
 
-        // Apply modifiers multiplicatively
+        // Essentials scale exponentially when scarce
+        var exponent = IsEssential(good) && ratio > 1.0f ? 2.0f : 1.0f;
+        var multiplier = MathF.Pow(ratio, exponent);
+
+        // Apply modifiers
         foreach (var mod in ActiveModifiers)
-            if (mod.Good == good)
-                price *= mod.Multiplier;
+            if (mod.Good == good) multiplier *= mod.Multiplier;
 
-        var min = basePrice * 0.20f;
-        var max = basePrice * 5.00f;
-        return (int)Math.Clamp(price, min, max);
+        // Wider band for essentials (10%–5000%) vs luxuries (20%–500%)
+        var minMult = IsEssential(good) ? 0.10f : 0.20f;
+        var maxMult = IsEssential(good) ? 50.0f : 5.0f;
+        return (int)Math.Clamp(basePrice * multiplier, basePrice * minMult, basePrice * maxMult);
     }
 }
 

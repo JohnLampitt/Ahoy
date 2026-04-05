@@ -73,7 +73,7 @@ public sealed class ScenarioBuilder
     // ---- Ports ----
 
     public PortId AddPort(string name, RegionId region, FactionId? controllingFaction = null,
-        float prosperity = 50f)
+        float prosperity = 50f, int population = 2000)
     {
         var id = new PortId(Guid.NewGuid());
         var port = new Port
@@ -84,12 +84,15 @@ public sealed class ScenarioBuilder
             ControllingFactionId = controllingFaction,
             Prosperity = prosperity,
         };
+        port.AdjustPopulation(population - port.Population);
 
         // Default economy — produces and consumes basic goods
+        var foodNeeded = population / 100;
         port.Economy.BaseProduction[TradeGood.Sugar] = 5;
-        port.Economy.BaseConsumption[TradeGood.Food] = 3;
+        port.Economy.BaseProduction[TradeGood.Food] = Math.Max(5, foodNeeded);
+        port.Economy.BaseConsumption[TradeGood.Food] = foodNeeded;
         port.Economy.Supply[TradeGood.Sugar] = 20;
-        port.Economy.Supply[TradeGood.Food] = 15;
+        port.Economy.Supply[TradeGood.Food] = foodNeeded * 30; // 30 days supply
         port.Economy.BasePrice[TradeGood.Sugar] = 10;
         port.Economy.BasePrice[TradeGood.Food] = 8;
 

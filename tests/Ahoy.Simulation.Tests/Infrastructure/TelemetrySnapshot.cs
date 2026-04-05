@@ -11,7 +11,7 @@ public sealed record TelemetrySnapshot
 {
     public int Tick { get; init; }
     public float AvgPortProsperity { get; init; }
-    public int TotalGoldInEconomy { get; init; }
+    public long TotalGoldInEconomy { get; init; }
     public int ActiveShips { get; init; }
     public int ShipsAtSea { get; init; }
     public int AliveIndividuals { get; init; }
@@ -32,9 +32,9 @@ public sealed record TelemetrySnapshot
             Tick = tick,
             AvgPortProsperity = state.Ports.Values.Count > 0
                 ? state.Ports.Values.Average(p => p.Prosperity) : 0,
-            TotalGoldInEconomy = state.Factions.Values.Sum(f => f.TreasuryGold)
-                + state.Individuals.Values.Sum(i => i.CurrentGold)
-                + state.Ships.Values.Sum(s => s.GoldOnBoard),
+            TotalGoldInEconomy = state.Factions.Values.Sum(f => (long)f.TreasuryGold)
+                + state.Individuals.Values.Sum(i => (long)i.CurrentGold)
+                + state.Ships.Values.Sum(s => (long)s.GoldOnBoard),
             ActiveShips = state.Ships.Count,
             ShipsAtSea = state.Ships.Values.Count(s => s.Location is not AtPort),
             AliveIndividuals = state.Individuals.Values.Count(i => i.IsAlive),

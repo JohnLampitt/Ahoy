@@ -266,8 +266,11 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
     {
         // Helper that creates + registers a port and adds it to its region
         Port MakePort(PortId id, string name, RegionId region, FactionId? faction,
-            float prosperity, bool pirateHaven = false)
+            float prosperity, int population = 0, bool pirateHaven = false)
         {
+            // Default population derived from prosperity: 80%→8000, 50%→3000, 30%→1000
+            if (population <= 0)
+                population = Math.Max(300, (int)(prosperity * prosperity * 1.25f));
             var port = new Port
             {
                 Id = id, Name = name, RegionId = region,
@@ -275,6 +278,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
                 Prosperity = prosperity,
                 IsPirateHaven = pirateHaven,
             };
+            port.AdjustPopulation(population - port.Population); // set to target
             state.Ports[id] = port;
             state.Regions[region].Ports.Add(id);
             if (faction.HasValue)
@@ -399,6 +403,14 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             };
 
             ApplyArchetype(eco, archetype);
+
+            // Seed starting food supply: enough for ~30 days at current population
+            var foodNeeded = Math.Max(1, port.Population / 100);
+            eco.Supply[TradeGood.Food] = Math.Max(eco.Supply.GetValueOrDefault(TradeGood.Food), foodNeeded * 30);
+
+            // Ensure food has a base price if not set by archetype
+            if (!eco.BasePrice.ContainsKey(TradeGood.Food))
+                eco.BasePrice[TradeGood.Food] = 20;
         }
     }
 
@@ -414,7 +426,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             case EconomicArchetype.TreasurePort:
                 eco.BaseProduction[TradeGood.Gold]   = 5;
                 eco.BaseProduction[TradeGood.Silver]  = 8;
-                eco.BaseConsumption[TradeGood.Food]   = 10;
+                eco.BaseProduction[TradeGood.Food]    = 15; // local farming + fishing
                 eco.BaseConsumption[TradeGood.Cloth]  = 4;
                 eco.BaseConsumption[TradeGood.Tools]  = 3;
                 eco.BasePrice[TradeGood.Gold]   = 800;
@@ -429,7 +441,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
                 eco.BaseProduction[TradeGood.Sugar]   = 30;
                 eco.BaseProduction[TradeGood.Rum]     = 15;
                 eco.BaseProduction[TradeGood.Indigo]  = 10;
-                eco.BaseConsumption[TradeGood.Food]   = 12;
+                eco.BaseProduction[TradeGood.Food]    = 10; // subsistence farming
                 eco.BaseConsumption[TradeGood.Tools]  = 5;
                 eco.BaseConsumption[TradeGood.Cloth]  = 3;
                 eco.BasePrice[TradeGood.Sugar]   = 60;
@@ -444,6 +456,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
                 eco.BaseProduction[TradeGood.Cloth]    = 8;
                 eco.BaseProduction[TradeGood.Tools]    = 6;
                 eco.BaseProduction[TradeGood.Rope]     = 5;
+                eco.BaseProduction[TradeGood.Food]     = 40; // major port = extensive hinterland farming
                 eco.BaseConsumption[TradeGood.Sugar]   = 8;
                 eco.BaseConsumption[TradeGood.Tobacco] = 6;
                 eco.BaseConsumption[TradeGood.Rum]     = 5;
@@ -459,7 +472,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             case EconomicArchetype.PirateHaven:
                 eco.BaseProduction[TradeGood.Rum]      = 10;
                 eco.BaseProduction[TradeGood.Gunpowder] = 3;
-                eco.BaseConsumption[TradeGood.Food]    = 8;
+                eco.BaseProduction[TradeGood.Food]     = 5; // fishing + foraging
                 eco.BaseConsumption[TradeGood.Weapons] = 4;
                 eco.BaseConsumption[TradeGood.Ammunition] = 5;
                 eco.BasePrice[TradeGood.Rum]       = 35;
@@ -472,7 +485,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             case EconomicArchetype.TimberPort:
                 eco.BaseProduction[TradeGood.Timber]   = 25;
                 eco.BaseProduction[TradeGood.Rope]     = 8;
-                eco.BaseConsumption[TradeGood.Food]    = 8;
+                eco.BaseProduction[TradeGood.Food]     = 10; // forestry + farming
                 eco.BaseConsumption[TradeGood.Iron]    = 5;
                 eco.BasePrice[TradeGood.Timber]  = 35;
                 eco.BasePrice[TradeGood.Rope]    = 30;
@@ -482,7 +495,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
 
             case EconomicArchetype.GeneralTrade:
             default:
-                eco.BaseProduction[TradeGood.Food]     = 8;
+                eco.BaseProduction[TradeGood.Food]     = 15; // self-sufficient farming
                 eco.BaseProduction[TradeGood.Tobacco]  = 5;
                 eco.BaseConsumption[TradeGood.Cloth]   = 4;
                 eco.BaseConsumption[TradeGood.Tools]   = 3;

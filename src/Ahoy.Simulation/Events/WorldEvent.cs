@@ -231,6 +231,13 @@ public record ContractFulfilled(
     WorldDate Date, SimulationLod SourceLod,
     IndividualId IssuerId, string TargetSubjectKey, int GoldPaid) : WorldEvent(Date, SourceLod);
 
+// ---- Economic events (Group 8) ----
+
+/// <summary>Emitted when a port's population is starving due to food shortage.</summary>
+public record PortStarvation(
+    WorldDate Date, SimulationLod SourceLod,
+    PortId PortId, int PopulationLoss, float StarvationRatio) : WorldEvent(Date, SourceLod);
+
 // ---- Knowledge conflict events (5C) ----
 
 /// <summary>Emitted when a knowledge conflict auto-resolves (spread > 0.40) or is resolved by investigation.</summary>

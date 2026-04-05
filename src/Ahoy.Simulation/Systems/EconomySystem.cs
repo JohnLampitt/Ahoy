@@ -42,7 +42,13 @@ public sealed class EconomySystem : IWorldSystem
             // PortConditionFlags modifier pass
             ApplyConditionFlags(port);
 
-            // Production and consumption
+            // Group 8: Calculate what this port needs based on population
+            CalculateTargetSupply(port);
+
+            // Group 8: Survival check — food consumption, starvation cascade
+            TickSurvival(port, events, lod, state);
+
+            // Production and non-essential consumption
             ProduceAndConsume(port, lod);
 
             // Price signal events for visible ports
@@ -152,48 +158,105 @@ public sealed class EconomySystem : IWorldSystem
         }
     }
 
+    // ---- Group 8: Population-driven economy ----
+
+    private static void CalculateTargetSupply(Port port)
+    {
+        var eco = port.Economy;
+        var pop = port.Population;
+
+        // Essentials — fixed ratio to population
+        eco.TargetSupply[TradeGood.Food] = Math.Max(1, pop / 100);
+        eco.TargetSupply[TradeGood.Medicine] = Math.Max(1, pop / 500);
+
+        // Non-essential consumption — BaseConsumption scaled by population/1000
+        foreach (var (good, baseRate) in eco.BaseConsumption)
+        {
+            if (EconomicProfile.IsEssential(good)) continue;
+            eco.TargetSupply[good] = Math.Max(1, (int)(baseRate * (pop / 1000f)));
+        }
+    }
+
+    private static void TickSurvival(Port port, IEventEmitter events, SimulationLod lod,
+        WorldState state)
+    {
+        var eco = port.Economy;
+        var foodNeeded = eco.TargetSupply.GetValueOrDefault(TradeGood.Food, 1);
+        var foodAvailable = eco.Supply.GetValueOrDefault(TradeGood.Food, 0);
+
+        if (foodAvailable >= foodNeeded)
+        {
+            // Fed — consume food, organic growth
+            eco.Supply[TradeGood.Food] = foodAvailable - foodNeeded;
+            var growth = (int)(port.Population * 0.001f); // 0.1% per day
+            if (growth > 0) port.AdjustPopulation(growth);
+        }
+        else
+        {
+            // STARVATION CASCADE
+            eco.Supply[TradeGood.Food] = 0; // consume all remaining
+            var starvationRatio = 1.0f - ((float)foodAvailable / foodNeeded);
+
+            // Population loss: 1% scaled by severity (5% was too aggressive — port empties in 20 ticks)
+            var popLoss = (int)(port.Population * 0.01f * starvationRatio);
+            if (popLoss > 0) port.AdjustPopulation(-popLoss);
+
+            // Prosperity drops — floor at 5% so production never fully stops
+            port.Prosperity = Math.Clamp(port.Prosperity - 2f * starvationRatio, 5f, 100f);
+
+            // Set Famine condition flag
+            if (!port.Conditions.HasFlag(PortConditionFlags.Famine))
+                port.SetCondition(PortConditionFlags.Famine, true);
+
+            events.Emit(new PortStarvation(
+                state.Date, lod, port.Id, popLoss, starvationRatio), lod);
+        }
+
+        // Clear Famine if food supply recovered above 80% of target
+        if (foodAvailable >= foodNeeded * 0.8f && port.Conditions.HasFlag(PortConditionFlags.Famine))
+            port.SetCondition(PortConditionFlags.Famine, false);
+    }
+
     private static void ProduceAndConsume(Port port, SimulationLod lod)
     {
         var economy = port.Economy;
 
-        // Apply scaled production/consumption at coarser LODs
-        var scale = lod switch
-        {
-            SimulationLod.Local    => 1.0f,
-            SimulationLod.Regional => 1.0f,
-            SimulationLod.Distant  => 1.0f, // still tick — just emits no events
-            _ => 1.0f,
-        };
+        // Production scales with population and prosperity.
+        // Prosperity floor at 0.3: even a miserable port produces 30% of capacity
+        // (people still farm and fish even in hard times).
+        var popScale = port.Population / 1000f;
+        var prosperityScale = 0.3f + (port.Prosperity / 100f) * 0.7f; // range: 0.3..1.0
 
-        foreach (var (good, amount) in economy.BaseProduction)
+        foreach (var (good, baseRate) in economy.BaseProduction)
         {
-            var produced = (int)(amount * scale);
-            economy.Supply[good] = economy.Supply.GetValueOrDefault(good) + produced;
+            var produced = (int)(baseRate * popScale * prosperityScale);
+            economy.Supply[good] = economy.Supply.GetValueOrDefault(good) + Math.Max(0, produced);
         }
 
-        foreach (var (good, amount) in economy.BaseConsumption)
+        // Non-essential consumption: consume from supply, track unmet demand
+        foreach (var (good, target) in economy.TargetSupply)
         {
-            var consumed = (int)(amount * scale);
-            var demand = economy.Demand.GetValueOrDefault(good) + consumed;
-            economy.Demand[good] = demand;
+            if (EconomicProfile.IsEssential(good)) continue; // food handled in TickSurvival
 
-            // Consume from supply if available
             var supply = economy.Supply.GetValueOrDefault(good);
-            var actualConsumed = Math.Min(supply, consumed);
-            economy.Supply[good] = supply - actualConsumed;
-            economy.Demand[good] = Math.Max(0, demand - actualConsumed);
+            var consumed = Math.Min(supply, target);
+            economy.Supply[good] = supply - consumed;
+            economy.Demand[good] = Math.Max(0, target - consumed);
         }
 
-        // Prosperity drift based on supply/demand balance
-        var surplusGoods = economy.BaseProduction.Keys
-            .Count(g => economy.Supply.GetValueOrDefault(g) > economy.Demand.GetValueOrDefault(g));
-        var shortageGoods = economy.BaseConsumption.Keys
-            .Count(g => economy.Demand.GetValueOrDefault(g) > economy.Supply.GetValueOrDefault(g));
+        // Prosperity drift based on how well non-essential needs are met
+        var metNeeds = economy.TargetSupply.Keys
+            .Count(g => !EconomicProfile.IsEssential(g)
+                && economy.Supply.GetValueOrDefault(g) >= economy.TargetSupply.GetValueOrDefault(g));
+        var unmetNeeds = economy.TargetSupply.Keys
+            .Count(g => !EconomicProfile.IsEssential(g)
+                && economy.Supply.GetValueOrDefault(g) < economy.TargetSupply.GetValueOrDefault(g));
 
-        var prosperityDelta = (surplusGoods - shortageGoods) * 0.5f;
+        var prosperityDelta = (metNeeds - unmetNeeds) * 0.5f;
 
-        // Baseline recovery: ports slowly drift toward 50 (mean-reversion)
-        // This prevents permanent economic collapse from transient crises
+        // TODO(Group8-Phase5): Remove this band-aid once Phases 3-4 (faction subsidies +
+        // profit-per-day routing) ensure merchants actually deliver food to starving ports.
+        // Without it, non-food-producing ports spiral to the 5% floor and never recover.
         prosperityDelta += (50f - port.Prosperity) * 0.005f;
 
         port.Prosperity = Math.Clamp(port.Prosperity + prosperityDelta, 0f, 100f);
