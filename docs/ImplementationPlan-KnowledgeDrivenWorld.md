@@ -130,37 +130,62 @@ Pass `KnowledgeStore` into decision evaluation so all NPC decision triggers can 
 same epistemic mechanisms as the player. Not limited to contracts — any
 knowledge-driven objective (bounties, trade, investigation, flight).
 
-#### 5B-1: NpcGoal Hierarchy
+#### 5B-1: NPC Goal Assignment (replaces "Contract Detection")
 
-**File:** `src/Ahoy.Simulation/State/NpcGoal.cs` (new)
+**File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
+
+The system evaluates NPCs for systemic goals, not just contract scanning:
+- **Rule-based default:** For each alive Individual with a combat role
+  (PirateCaptain, NavalOfficer, Privateer, Informant), scan their
+  `IndividualHolder` for high-confidence `ContractClaim` facts (> 0.40)
+  with supporting intel (> 0.50). If found, assign a `FulfillContractGoal`.
+- Informants eligible only for `TargetDead` contracts (assassination/sabotage).
+- **Future LLM hook:** Goal assignment is the point where the LLM can override
+  rule-based selection based on personality, grudges, risk assessment. This is
+  completely decoupled from the simulation loop — the LLM influences *what* goal
+  is chosen, the EpistemicResolver handles *how* it's executed.
+
+#### 5B-2: Goal Pursuit & Resolver Model (replaces "Contract Pursuit Model")
+
+**File:** `src/Ahoy.Simulation/State/GoalModels.cs` (new)
+
+The goal (the behavioural objective) is separated from the pursuit (the
+execution state machine):
 
 ```csharp
-public abstract record NpcGoal
+// ---- The Behavioural Objective ----
+
+public abstract record NpcGoal(Guid Id, IndividualId NpcId);
+
+public record FulfillContractGoal(
+    Guid Id, IndividualId NpcId,
+    ContractClaim Contract) : NpcGoal(Id, NpcId);
+
+// Future: TradeGoal, InvestigateGoal, FleeGoal, EscortGoal, etc.
+
+// ---- The State Machine ----
+
+public enum PursuitState { Active, Stalled, Completed, Abandoned }
+
+public sealed class GoalPursuit
 {
-    public required IndividualId PursuerId { get; init; }
-    public NpcGoalStatus Status { get; set; }  // Pursuing | Stalled | Completed | Abandoned
+    public required NpcGoal ActiveGoal { get; init; }
+    public PursuitState State { get; set; } = PursuitState.Active;
+    public int TicksStalled { get; set; }
     public required int ActivatedOnTick { get; init; }
 }
-
-public enum NpcGoalStatus { Pursuing, Stalled, Completed, Abandoned }
-
-// Contract pursuit (bounty hunting, assassination)
-public record ContractGoal(ContractClaim Contract) : NpcGoal;
-
-// Trade pursuit (route to known profitable port)
-// Future: investigation, fleeing, escort, etc.
 ```
 
 **File:** `src/Ahoy.Simulation/State/WorldState.cs`
 
 ```csharp
-public Dictionary<IndividualId, NpcGoal> NpcGoals { get; } = new();
+public Dictionary<IndividualId, GoalPursuit> NpcPursuits { get; } = new();
 ```
 
-Lives on WorldState so ShipMovementSystem (system 2) can read goals when
+Lives on WorldState so ShipMovementSystem (system 2) can read pursuits when
 setting NPC routes, even though QuestSystem (system 7) creates them.
 
-#### 5B-2: ShipRoute Union Type
+#### 5B-3: ShipRoute Union Type
 
 **File:** `src/Ahoy.Simulation/State/Ship.cs`
 
@@ -178,40 +203,59 @@ public ShipRoute? Route { get; set; }  // replaces RoutingDestination + PoiDesti
 ```
 
 `PursuitRoute` navigates to `LastKnownRegion` and performs proximity check
-on arrival for interception. NpcGoal determines which Route variant to set.
+on arrival for interception. The active `GoalPursuit` determines which Route
+variant to set.
 
-#### 5B-3: NPC Goal Detection
+#### 5B-4: Epistemic Execution & Stall/Leak (replaces "Contract Resolution")
 
-**File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
+**Execution — EpistemicResolver pattern:**
 
-New method `ScanForNpcGoals(WorldState)`:
-- For each alive Individual with role in {PirateCaptain, NavalOfficer, Privateer, Informant}:
-  - Read their `IndividualHolder` for `ContractClaim` facts with confidence > 0.40
-  - Check supporting intel (same gate as player: separate fact about TargetSubjectKey)
-  - Informants eligible only for `TargetDead` contracts (assassination/sabotage)
-  - If conditions met: create `ContractGoal` on `WorldState.NpcGoals`
-- Rule-based goal selection by default; LLM can override via DecisionQueue
-  (adds personality-weighted judgement without changing the execution path)
+**File:** `src/Ahoy.Simulation/Decisions/RuleBasedDecisionProvider.cs`
 
-#### 5B-4: NPC Goal Resolution & Stall/Leak
-
-**File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
-
-Each tick, for active `NpcGoal`:
-- If pursuer's ship is in same region as target: attempt resolution (stat check)
+For each active `GoalPursuit`, the resolver evaluates the NPC's current
+knowledge state against the goal's requirements and returns the immediate
+primitive action:
+- NPC knows target location (high confidence `ShipLocationClaim`) → set
+  `PursuitRoute`, state remains Active
+- NPC lacks target location → trigger `InvestigateRemoteCommand` if NPC has
+  gold, otherwise Stall
+- NPC in same region as target → attempt resolution (stat check)
 - Informant `TargetDead` resolution: abstracted stat-check gated by faction's
-  `IntelligenceCapability` on arrival at target's port. Failure emits `AgentBurned`.
-- If pursuer's intel confidence drops below 0.30: status -> **Stalled**
-- If target destroyed/dead by NPC: emit `NpcClaimedContract` event, pay NPC
-- Player receives no compensation — "you were too slow" is intentional
+  `IntelligenceCapability` on arrival at target's port. Failure emits
+  `AgentBurned`.
+- Target destroyed/dead by NPC → emit `NpcClaimedContract`, pay NPC, state
+  Completed. Player receives no compensation — "you were too slow."
 
-**Stall & Leak mechanic:** When a goal transitions to Stalled:
-1. NPC continues normal behaviour (falls back to trade routing or HomePort)
-2. On next dock, the stalled goal's context leaks into port gossip via
-   ShipHolder → PortHolder propagation
-3. Observable side effects: "Captain Vane abandoned his hunt for the Silver
-   Galleon near Jamaica" enters the port's knowledge pool
-4. Player (or other NPCs) can discover and act on this leaked intelligence
+The resolver doesn't know what kind of goal it's executing. It follows the
+epistemic breadcrumb trail: what does the NPC know? What do they need to know?
+What's the next action to close that gap?
+
+**Stalling:**
+
+If the NPC lacks the gold, capability, or knowledge to execute the next
+breadcrumb, increment `TicksStalled`. If `TicksStalled > 14`, set state to
+Abandoned.
+
+**Stall & Leak mechanic:**
+
+**File:** `src/Ahoy.Simulation/Systems/KnowledgeSystem.cs`
+
+When a `GoalPursuit` is marked Abandoned:
+1. Emit `NpcPursuitAbandoned` event
+2. KnowledgeSystem identifies the highest-confidence fact the NPC held
+   regarding that goal
+3. Inject that fact into the `PortHolder` where the NPC is currently docked
+4. This generates tavern gossip: "Captain Vane abandoned his hunt for the
+   Silver Galleon near Jamaica"
+5. Player (or other NPCs) can discover and act on this leaked intelligence
+
+**AtSea edge case:** If abandonment triggers while the NPC is AtSea or
+EnRoute, the leak is deferred — the fact is held in ShipHolder and injected
+into the next PortHolder the NPC docks at. This is consistent with existing
+ship-carried gossip propagation: sailors don't shout their frustrations into
+the ocean, they grumble about it in the next tavern. The existing
+`ArrivedThisTick` flag on Ship provides the trigger point — KnowledgeSystem
+already processes arrival gossip using this flag.
 
 This is the bridge between NPC failure and player opportunity. Silent expiry
 is replaced with emergent storytelling.
@@ -360,8 +404,8 @@ Group 5A (NPC knowledge-gated decisions)
 Group 5E (claim circulation — makes 5A meaningful by giving NPCs facts to act on)
   All items independent, parallel
   ↓
-Group 5B (NPC goal pursuit — needs 5A for NPC routing + 5E for claim flow)
-  5B-1 + 5B-2 first (NpcGoal model + ShipRoute union), then 5B-3 + 5B-4
+Group 5B (NPC goal pursuit �� needs 5A for NPC routing + 5E for claim flow)
+  5B-2 + 5B-3 first (GoalPursuit model + ShipRoute union), then 5B-1 + 5B-4
   ↓
 Group 5C (conflict resolution — benefits from all above being live)
   5C-1 first (player-facing), then 5C-2, then 5C-3 + 5C-4
@@ -375,7 +419,7 @@ Group 5C (conflict resolution — benefits from all above being live)
 
 1. **No system reads ground truth for NPC decisions after 5A.** All NPC behaviour flows from held facts. This is the single most important invariant.
 
-2. **NPC goal pursuit is lightweight.** `NpcGoal` is not a full `QuestInstance` — it has no branches, no predefined phases, no player-facing UI. It's a routing directive with a resolution condition. Lives on WorldState for cross-system visibility.
+2. **NPC goal pursuit is lightweight.** `GoalPursuit` wraps an `NpcGoal` (the objective) with an execution state machine (Active/Stalled/Completed/Abandoned). No branches, no predefined phases, no player-facing UI. The EpistemicResolver determines the next primitive action from the NPC's knowledge state. Lives on WorldState for cross-system visibility.
 
 3. **ShipRoute union type replaces PortId? RoutingDestination.** `PortRoute`, `PursuitRoute`, `PoiRoute` — consolidates routing intent into a single discriminated union. `PursuitRoute` enables interception at sea.
 

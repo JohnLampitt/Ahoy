@@ -119,31 +119,44 @@ Revisit only if profiler shows RuleBasedDecisionProvider exceeding 2-3ms/tick.
 
 ## 5B — NPC Quest Participation (REVISE → Revised with NpcGoal architecture)
 
-### NpcContractPursuit → NpcGoal hierarchy
+### NpcContractPursuit → NpcGoal + GoalPursuit (separated)
 
-The original proposal used a contract-specific `NpcContractPursuit`. The
-architectural pivot replaces this with a general **NpcGoal hierarchy** that
-handles any knowledge-driven objective (bounties, trade routing, investigation,
-fleeing danger). Same lightweight footprint — a routing directive with a
-resolution condition — but not limited to contracts.
+The original proposal used a contract-specific `NpcContractPursuit` that
+conflated the objective with the execution state. The revised architecture
+cleanly separates these:
 
-Lives on WorldState for cross-system visibility (same tick-ordering rationale
-as the original proposal):
+- **NpcGoal** (the behavioural objective): `FulfillContractGoal`,
+  future `TradeGoal`, `InvestigateGoal`, `FleeGoal`, etc. Immutable record.
+- **GoalPursuit** (the execution state machine): `Active → Stalled → Abandoned`
+  or `Active → Completed`. Tracks `TicksStalled`. Wraps an `NpcGoal`.
 
 ```csharp
 // WorldState.cs
-public Dictionary<IndividualId, NpcGoal> NpcGoals { get; } = new();
+public Dictionary<IndividualId, GoalPursuit> NpcPursuits { get; } = new();
 ```
+
+Lives on WorldState for cross-system visibility (same tick-ordering rationale
+as the original proposal).
+
+### EpistemicResolver pattern — **New addition**
+
+Goal execution follows the epistemic breadcrumb trail: what does the NPC know?
+What do they need to know? What's the next primitive action to close that gap?
+The resolver doesn't know what kind of goal it's executing — it evaluates the
+NPC's knowledge state against the goal's requirements and returns the next
+action (set PursuitRoute, investigate, intercept, stall).
 
 ### Stall & Leak mechanic — **New addition**
 
-When an NPC stalls on a goal (intel confidence decays below threshold, route
-blocked, target lost), instead of silent expiry:
-1. Goal status transitions to Stalled
-2. On next dock, the NPC's knowledge about the stalled goal leaks into port
-   gossip (ShipHolder → PortHolder propagation)
-3. This creates player opportunity: "Captain Vane abandoned his hunt for the
-   Silver Galleon near Jamaica" is actionable intelligence
+When an NPC stalls on a goal (intel confidence decays below threshold, lacks
+gold for investigation, route blocked), instead of silent expiry:
+1. `TicksStalled` increments each tick the NPC can't make progress
+2. At `TicksStalled > 14`: state → Abandoned, emit `NpcPursuitAbandoned`
+3. KnowledgeSystem catches the event and injects the NPC's highest-confidence
+   fact about the goal into the PortHolder where the NPC is docked
+4. **AtSea edge case:** If abandonment triggers while AtSea/EnRoute, the leak
+   defers — fact held in ShipHolder, injected into PortHolder on next dock via
+   `ArrivedThisTick` (consistent with existing ship-carried gossip propagation)
 
 This is the bridge between NPC failure and player discovery.
 
@@ -254,11 +267,11 @@ as a baseline — they're structurally leaky regardless of events.
 | Item | Source | Action |
 |---|---|---|
 | PortLocationClaim | Competing LLM | **Rejected** — geography is structural, not epistemic |
-| NpcGoal on WorldState | Pivot (was NpcContractPursuit) | **Adopted** — generalised goal hierarchy, tick ordering requires WorldState |
+| NpcGoal + GoalPursuit on WorldState | Pivot (was NpcContractPursuit) | **Adopted** — goal/pursuit separated; generalised hierarchy, tick ordering requires WorldState |
+| EpistemicResolver pattern | Pivot | **Adopted** — unified quest architecture; breadcrumb execution where resolver evaluates NPC knowledge vs goal requirements, returns next primitive action |
 | ShipRoute union type | Integration | **Adopted** — replaces PortId? RoutingDestination + PoiDestination |
 | NpcClaimedContract event | Integration | **Adopted** — player communication for lost bounties |
-| Stall & Leak mechanic | Pivot | **Adopted** — NPC stalls leak intel into port gossip, creates player opportunity |
-| EpistemicResolver | Pivot | **Adopted** — unified quest architecture, replaces template state machines |
+| Stall & Leak mechanic | Pivot | **Adopted** — NPC stalls leak intel into port gossip; AtSea abandonment defers leak to next dock via ArrivedThisTick |
 | LLM goal selection invariant | Pivot | **Adopted** — LLM selects goals, never determines outcomes |
 | KnowledgeConflictResolved event | Competing LLM | **Adopted** — UI cleanup signal |
 | ConflictCondition variant | Competing LLM | **Adopted** — clean quest trigger for conflicts |
