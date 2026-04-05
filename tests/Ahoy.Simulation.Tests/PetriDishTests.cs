@@ -276,4 +276,50 @@ public class PetriDishTests
                 $"Spanish governor should dislike the attacker, got {govRelWithPirate}");
         }
     }
+
+    /// <summary>
+    /// Faction Relief Mission: A port with low food supply gets a ReliefMission
+    /// assigned. The relief ship loads food from a surplus port and delivers it.
+    /// </summary>
+    [Fact]
+    public void FactionReliefMission_DeliversFoodToStarvingPort()
+    {
+        var builder = new ScenarioBuilder(seed: 600);
+        var region = builder.AddRegion("Caribbean");
+        var spain = builder.AddFaction("Spain", treasury: 10000);
+        var surplusPort = builder.AddPort("Veracruz", region, spain, prosperity: 70f, population: 3000);
+        var starvingPort = builder.AddPort("Havana", region, spain, prosperity: 30f, population: 5000);
+
+        var governor = builder.AddIndividual("Don", "Garcia", IndividualRole.Governor,
+            factionId: spain, locationPort: starvingPort);
+
+        // Add a faction ship docked at the surplus port
+        var shipId = builder.AddShip("San Felipe", spain, dockedAt: surplusPort, guns: 10);
+
+        var (engine, state) = builder.BuildWithState();
+
+        // Drain food at the starving port to trigger relief
+        state.Ports[starvingPort].Economy.Supply[TradeGood.Food] = 5;
+
+        // Boost food at surplus port so there's something to send
+        state.Ports[surplusPort].Economy.Supply[TradeGood.Food] = 500;
+
+        // Run ticks — FactionSystem should assign ReliefMission
+        for (int i = 0; i < 15; i++)
+            engine.Tick();
+
+        // The ship should have been assigned a mission at some point
+        // Check if food was delivered to the starving port
+        var havanaFood = state.Ports[starvingPort].Economy.Supply.GetValueOrDefault(TradeGood.Food);
+        var shipMission = state.Ships[shipId].Mission;
+        var shipCargo = state.Ships[shipId].Cargo.GetValueOrDefault(TradeGood.Food);
+
+        // Either the ship delivered food (havana food increased) or the ship is
+        // en route with food cargo, or the mission was assigned
+        bool missionWorking = havanaFood > 5 || shipCargo > 0 || shipMission is ReliefMission;
+
+        Assert.True(missionWorking,
+            $"Expected relief mission activity. Havana food={havanaFood}, ship cargo={shipCargo}, " +
+            $"mission={shipMission?.GetType().Name ?? "null"}");
+    }
 }

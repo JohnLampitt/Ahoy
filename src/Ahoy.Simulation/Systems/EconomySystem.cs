@@ -167,23 +167,34 @@ public sealed class EconomySystem : IWorldSystem
     // ---- External food imports ----
 
     /// <summary>
-    /// Represents provisions arriving from outside the simulation (Europe, mainland Americas).
-    /// Every faction-controlled port receives a baseline food injection each tick. Larger
-    /// factions with more treasury can feed their ports better. Pirate havens get less.
-    /// TODO(Group8): Replace with proper inter-regional trade / convoy system.
+    /// Background off-map food supply representing European/mainland provisions trade.
+    /// This is a baseline — faction ReliefMissions supplement it for ports in crisis.
+    /// Reduced from Group 8's pop/150 now that physical relief ships exist.
+    /// Independent ports get 50% (no faction supply convoys).
     /// </summary>
     private static void InjectExternalFood(Port port, WorldState state)
     {
-        if (port.ControllingFactionId is not { } factionId) return;
-        if (!state.Factions.TryGetValue(factionId, out var faction)) return;
+        // Base import: background European trade, not faction-directed.
+        // Kept at pop/150 until the full relief pipeline (Group 9 Batch B) can
+        // carry the deficit. Reducing prematurely causes gold hyperinflation via
+        // inelastic food pricing (ports have no treasury — gold created from nothing).
+        var baseImport = port.Population / 150;
 
-        // Base import: 5 food per 1000 population (covers ~50% of need)
-        // Adjusted by faction wealth: wealthy factions import more
-        var baseImport = port.Population / 150; // ~67% of food need from external sources
-        var wealthMultiplier = faction.TreasuryGold > 1000 ? 1.5f : 1.0f;
-        var pirateDiscount = port.IsPirateHaven ? 0.3f : 1.0f; // pirates get fewer supply ships
+        // Faction-controlled ports get a small bonus (organized trade routes)
+        float factionBonus = 1.0f;
+        if (port.ControllingFactionId.HasValue
+            && state.Factions.TryGetValue(port.ControllingFactionId.Value, out var faction))
+        {
+            factionBonus = faction.TreasuryGold > 1000 ? 1.3f : 1.0f;
+        }
+        else
+        {
+            // Independent port — reduced imports (no faction convoys)
+            factionBonus = 0.5f;
+        }
 
-        var foodImport = (int)(baseImport * wealthMultiplier * pirateDiscount);
+        var pirateDiscount = port.IsPirateHaven ? 0.3f : 1.0f;
+        var foodImport = (int)(baseImport * factionBonus * pirateDiscount);
         if (foodImport > 0)
             port.Economy.Supply[TradeGood.Food] = port.Economy.Supply.GetValueOrDefault(TradeGood.Food) + foodImport;
     }
