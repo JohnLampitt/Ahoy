@@ -551,6 +551,32 @@ public sealed class KnowledgeSystem : IWorldSystem
             observer.PlayerRelationship = Math.Clamp(observer.PlayerRelationship + delta, -100f, 100f);
     }
 
+    // ---- 6E: Pardon effect ----
+
+    /// <summary>
+    /// When a PardonClaim reaches an individual of the pardoning faction,
+    /// shift their relationship with the pardoned actor 50% toward zero.
+    /// </summary>
+    private static void ApplyPardonEffect(IndividualId observerId, KnowledgeFact fact, WorldState state)
+    {
+        if (fact.Claim is not PardonClaim pardon) return;
+        if (!state.Individuals.TryGetValue(observerId, out var observer)) return;
+
+        // Only affects NPCs of the pardoning faction
+        if (observer.FactionId != pardon.Faction) return;
+
+        var currentRel = state.GetRelationship(observerId, pardon.PardonedActor);
+        if (currentRel >= 0) return; // no hostility to pardon
+
+        // Shift 50% toward zero, scaled by confidence
+        var shift = -currentRel * 0.5f * fact.Confidence;
+        state.AdjustRelationship(observerId, pardon.PardonedActor, shift);
+
+        // Legacy compat
+        if (pardon.PardonedActor == state.Player.CaptainIndividualId)
+            observer.PlayerRelationship = Math.Clamp(observer.PlayerRelationship + shift, -100f, 100f);
+    }
+
     // ---- Propagation via ship arrivals ----
 
     private void PropagateViaArrivingShips(WorldState state, SimulationContext context, int tick)
@@ -661,7 +687,10 @@ public sealed class KnowledgeSystem : IWorldSystem
 
                 // 6C: Apply relationship consequences when gossip reaches an individual
                 if (to is IndividualHolder ih)
+                {
                     ApplyRelationshipConsequences(ih.Individual, propagated, state);
+                    ApplyPardonEffect(ih.Individual, propagated, state);
+                }
             }
             else if (existing.Claim == fact.Claim)
             {

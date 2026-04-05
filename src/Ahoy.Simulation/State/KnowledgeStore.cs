@@ -89,6 +89,16 @@ public record IndividualAllegianceClaim(
 /// When ingested by an IndividualHolder, triggers relationship mutation (6C).
 /// BeneficiaryId tracks who ordered/paid for the act (e.g., the governor who posted the bounty).
 /// </summary>
+/// <summary>
+/// A pardon issued by a governor/official, clearing hostilities for a specific actor
+/// within a faction. When propagated, accelerates forgetting of hostile deeds and
+/// shifts relationships toward neutral.
+/// </summary>
+public record PardonClaim(
+    IndividualId GrantedBy,
+    FactionId Faction,
+    IndividualId PardonedActor) : KnowledgeClaim;
+
 public record IndividualActionClaim(
     IndividualId ActorId,
     IndividualId TargetId,
@@ -202,6 +212,7 @@ public sealed class KnowledgeFact
         ContractClaim c                 => $"Contract:{c.IssuerId.Value}:{c.TargetSubjectKey}",
         OceanPoiClaim c                 => $"Poi:{c.Poi.Value}",
         IndividualAllegianceClaim c     => $"Allegiance:{c.Individual.Value}",
+        PardonClaim c                  => $"Pardon:{c.Faction.Value}:{c.PardonedActor.Value}",
         IndividualActionClaim c        => $"Action:{c.ActorId.Value}:{c.TargetId.Value}:{c.Context.GetHashCode():X8}",
         _                               => claim.GetType().Name,
     };
