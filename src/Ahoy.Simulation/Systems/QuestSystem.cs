@@ -258,7 +258,21 @@ public sealed class QuestSystem : IWorldSystem
 
         // Add supply to port
         if (state.Ports.TryGetValue(portId, out var port))
+        {
             port.Economy.Supply[good] = port.Economy.Supply.GetValueOrDefault(good) + DeliveryQty;
+
+            // Crisis 2: Medicine delivery cures epidemic
+            if (good == TradeGood.Medicine && port.Conditions.HasFlag(PortConditionFlags.Plague))
+            {
+                port.Conditions &= ~PortConditionFlags.Plague;
+                port.EpidemicTicksRemaining = null;
+
+                // Cure all infected crew in docked ships
+                foreach (var dockedShipId in port.DockedShips)
+                    if (state.Ships.TryGetValue(dockedShipId, out var dockedShip))
+                        dockedShip.HasInfectedCrew = false;
+            }
+        }
 
         // Pay player
         state.Player.PersonalGold += contract.GoldReward;

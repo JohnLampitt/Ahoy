@@ -108,6 +108,148 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
 
         // --- 6D: Personal goal generation pass ---
         EvaluatePersonalGoals(state, context);
+
+        // --- Group 7: Crisis-driven contract seeding ---
+        SeedCrisisContracts(state);
+    }
+
+    // ---- Group 7 Phase 3: Crisis Contract Seeding ----
+
+    private void SeedCrisisContracts(WorldState state)
+    {
+        foreach (var individual in state.Individuals.Values)
+        {
+            if (!individual.IsAlive) continue;
+            if (individual.Role != IndividualRole.Governor) continue;
+            if (individual.LocationPortId is not { } portId) continue;
+            if (!state.Ports.TryGetValue(portId, out var port)) continue;
+
+            // Crisis 2: Epidemic — seed Medicine and Food delivery contracts
+            if (port.Conditions.HasFlag(PortConditionFlags.Plague))
+                SeedEpidemicContracts(individual, port, state);
+
+            // Crisis 3: Blockade — seed bounty on blockading flagship
+            if (port.Conditions.HasFlag(PortConditionFlags.Blockaded))
+                SeedBlockadeBounty(individual, port, state);
+
+            // Crisis 6: War — seed Letters of Marque against enemy ships
+            if (individual.FactionId.HasValue
+                && state.Factions.TryGetValue(individual.FactionId.Value, out var faction)
+                && faction.AtWarWith.Count > 0)
+                SeedLettersOfMarque(individual, faction, state);
+        }
+    }
+
+    private void SeedEpidemicContracts(Individual governor, Port port, WorldState state)
+    {
+        var targetKey = $"Port:{port.Id.Value}:Medicine";
+        if (state.Quests.IsOnCooldown(targetKey, state.Date)) return;
+
+        // Premium scales with epidemic severity (prosperity loss)
+        var premium = Math.Max(200, (int)(500 * (1f - port.Prosperity / 100f)));
+
+        var contract = new ContractClaim(
+            IssuerId: governor.Id,
+            IssuerFactionId: governor.FactionId ?? default,
+            TargetSubjectKey: targetKey,
+            Condition: ContractConditionType.GoodsDelivered,
+            GoldReward: premium,
+            Archetype: NarrativeArchetype.DesperatePlea);
+
+        var fact = new KnowledgeFact
+        {
+            Claim = contract,
+            Sensitivity = KnowledgeSensitivity.Public, // desperate — broadcast widely
+            Confidence = 0.90f,
+            BaseConfidence = 0.90f,
+            ObservedDate = state.Date,
+            SourceHolder = new IndividualHolder(governor.Id),
+        };
+        state.Knowledge.AddFact(new PortHolder(port.Id), fact);
+        state.Quests.RecordCooldown(targetKey, state.Date.Advance(10));
+    }
+
+    private void SeedBlockadeBounty(Individual governor, Port port, WorldState state)
+    {
+        // Find the strongest hostile ship in the region (the flagship)
+        ShipId? flagship = null;
+        int bestGuns = 0;
+        foreach (var ship in state.Ships.Values)
+        {
+            if (ship.OwnerFactionId is null) continue;
+            if (ship.OwnerFactionId == governor.FactionId) continue;
+            var shipRegion = state.GetShipRegion(ship.Id);
+            if (shipRegion != port.RegionId) continue;
+            if (ship.Guns > bestGuns) { flagship = ship.Id; bestGuns = ship.Guns; }
+        }
+
+        if (flagship is null) return;
+
+        var targetKey = $"Ship:{flagship.Value.Value}";
+        if (state.Quests.IsOnCooldown(targetKey, state.Date)) return;
+
+        // Governor empties treasury for this
+        var reward = Math.Min(governor.CurrentGold, 500);
+        if (reward < 100) return;
+        governor.CurrentGold -= reward;
+
+        var contract = new ContractClaim(
+            IssuerId: governor.Id,
+            IssuerFactionId: governor.FactionId ?? default,
+            TargetSubjectKey: targetKey,
+            Condition: ContractConditionType.TargetDestroyed,
+            GoldReward: reward,
+            Archetype: NarrativeArchetype.ColonialCommission);
+
+        var fact = new KnowledgeFact
+        {
+            Claim = contract,
+            Sensitivity = KnowledgeSensitivity.Public,
+            Confidence = 0.85f,
+            BaseConfidence = 0.85f,
+            ObservedDate = state.Date,
+            SourceHolder = new IndividualHolder(governor.Id),
+        };
+        state.Knowledge.AddFact(new PortHolder(port.Id), fact);
+        state.Quests.RecordCooldown(targetKey, state.Date.Advance(15));
+    }
+
+    private void SeedLettersOfMarque(Individual governor, Faction faction, WorldState state)
+    {
+        // Seed bounties on enemy faction ships — one per tick, targeting the most valuable
+        foreach (var enemyFactionId in faction.AtWarWith)
+        {
+            var targetShip = state.Ships.Values
+                .Where(s => s.OwnerFactionId == enemyFactionId && !s.IsPlayerShip && s.HullIntegrity > 0)
+                .OrderByDescending(s => s.Guns + s.GoldOnBoard)
+                .FirstOrDefault();
+
+            if (targetShip is null) continue;
+
+            var targetKey = $"Ship:{targetShip.Id.Value}";
+            if (state.Quests.IsOnCooldown(targetKey, state.Date)) continue;
+
+            var contract = new ContractClaim(
+                IssuerId: governor.Id,
+                IssuerFactionId: governor.FactionId ?? default,
+                TargetSubjectKey: targetKey,
+                Condition: ContractConditionType.TargetDestroyed,
+                GoldReward: 100 + targetShip.Guns * 10, // bounty scales with threat
+                Archetype: NarrativeArchetype.ColonialCommission);
+
+            var fact = new KnowledgeFact
+            {
+                Claim = contract,
+                Sensitivity = KnowledgeSensitivity.Public,
+                Confidence = 0.90f,
+                BaseConfidence = 0.90f,
+                ObservedDate = state.Date,
+                SourceHolder = new FactionHolder(governor.FactionId!.Value),
+            };
+            state.Knowledge.AddFact(new PortHolder(governor.LocationPortId!.Value), fact);
+            state.Quests.RecordCooldown(targetKey, state.Date.Advance(20));
+            break; // one letter of marque per governor per tick
+        }
     }
 
     // ---- 6D: Personal Goal Generation ----
