@@ -19,6 +19,41 @@ the system it affects, the symptom, and the intended fix.
   not blindly create new facts. The `AddAndSupersede` path exists but `ShareFacts`
   bypasses it when the claim content differs slightly (e.g., different confidence).
 
+### Caribbean Food Economy Collapse
+- **System:** EconomySystem / `InjectExternalFood`, world data archetypes
+- **Symptom:** At 365 ticks, most major ports hit 0% prosperity. Small
+  `GeneralTrade` ports have zero food supply despite producing it. Only ports
+  receiving external food imports survive. Three ports reach population floor
+  (100) with Famine flag.
+- **Diagnosis from report-365.txt:**
+  - Major ports (Havana, Cartagena, Bridgetown) have food supply but prosperity
+    still crashes — food imports cover ~67% of need, local production covers
+    the rest only at high prosperity. Once prosperity dips, production drops
+    below need and the spiral starts.
+  - Small GeneralTrade ports (San Juan, Santo Domingo) have `BaseProduction[Food]=8`
+    but zero food on hand — production at population-scaled rate is consumed
+    immediately with nothing left over.
+  - Merchant arbitrage routing works (merchants buy cheap food and deliver it)
+    but there aren't enough food-producing ports or merchants to serve the
+    entire Caribbean. The food deficit is structural.
+- **Root cause:** The Caribbean historically imported most of its food. The
+  `InjectExternalFood` placeholder partially models this but the numbers
+  aren't tuned. Additionally, only `GeneralTrade` archetype produces food —
+  all other archetypes (TreasurePort, SugarProducer, Entrepot, PirateHaven,
+  TimberPort) have food BaseProduction added but at rates too low for their
+  population.
+- **Fix options (choose one or combine):**
+  1. Increase external food import rate to fully cover the deficit (simple but
+     removes food scarcity as a gameplay mechanic)
+  2. Add a proper supply convoy system where faction ships physically carry
+     food from off-map, can be intercepted by pirates (best long-term)
+  3. Increase food BaseProduction rates at each archetype to make more ports
+     self-sufficient (reduces need for trade, less interesting)
+  4. Add food production as a function of port hinterland/farmland — a new
+     field on Port representing agricultural capacity independent of archetype
+- **Workaround:** Mean-reversion band-aid `(50 - prosperity) * 0.005` prevents
+  total collapse but masks the structural deficit.
+
 ### Gold Inflation: Ports Have No Treasury
 - **System:** EconomySystem / `ExecuteMerchantTrade`
 - **Symptom:** Gold is created from nothing when merchants sell goods — there's no
