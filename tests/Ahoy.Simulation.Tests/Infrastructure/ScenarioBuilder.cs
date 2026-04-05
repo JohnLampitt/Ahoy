@@ -204,6 +204,19 @@ public sealed class ScenarioBuilder
             }
         }
 
+        // Apply pardon effect when seeding into individual holder
+        if (holder is IndividualHolder ih2 && claim is PardonClaim pardon)
+        {
+            var observerId2 = ih2.Individual;
+            if (_state.Individuals.TryGetValue(observerId2, out var observer2)
+                && observer2.FactionId == pardon.Faction)
+            {
+                var currentRel = _state.GetRelationship(observerId2, pardon.PardonedActor);
+                if (currentRel < 0)
+                    _state.AdjustRelationship(observerId2, pardon.PardonedActor, -currentRel * 0.5f * confidence);
+            }
+        }
+
         return this;
     }
 
