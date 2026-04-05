@@ -231,6 +231,15 @@ public record ContractFulfilled(
     WorldDate Date, SimulationLod SourceLod,
     IndividualId IssuerId, string TargetSubjectKey, int GoldPaid) : WorldEvent(Date, SourceLod);
 
+// ---- Knowledge conflict events (5C) ----
+
+/// <summary>Emitted when a knowledge conflict auto-resolves (spread > 0.40) or is resolved by investigation.</summary>
+public record KnowledgeConflictResolved(
+    WorldDate Date, SimulationLod SourceLod,
+    string SubjectKey,
+    KnowledgeFactId WinningFactId,
+    KnowledgeHolderId HolderId) : WorldEvent(Date, SourceLod);
+
 // ---- NPC goal pursuit events (5B) ----
 
 /// <summary>Emitted when an NPC abandons a goal after stalling too long. Triggers Stall & Leak.</summary>

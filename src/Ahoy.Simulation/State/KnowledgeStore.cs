@@ -256,6 +256,10 @@ public sealed class KnowledgeStore
             .Where(kv => kv.Key.Item1.Equals(holder))
             .Select(kv => kv.Value);
 
+    /// <summary>All active conflicts across all holders. Returns (holder, conflict) pairs.</summary>
+    public IEnumerable<(KnowledgeHolderId Holder, KnowledgeConflict Conflict)> GetAllConflicts() =>
+        _conflicts.Select(kv => (kv.Key.Item1, kv.Value));
+
     /// <summary>
     /// Reliability weight for a given source. Default 1.0.
     /// Null source (direct witness) always returns 1.0.

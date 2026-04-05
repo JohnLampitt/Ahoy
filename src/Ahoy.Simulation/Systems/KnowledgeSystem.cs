@@ -78,6 +78,9 @@ public sealed class KnowledgeSystem : IWorldSystem
 
         // 5. Detect and supersede disinformation contradicted by high-confidence truth facts
         DetectDisinformationContradictions(state, tick);
+
+        // 6. 5C: Auto-resolve knowledge conflicts where spread > 0.40
+        AutoResolveConflicts(state, context, events, tick);
     }
 
     // ---- Event ingestion ----
@@ -738,6 +741,38 @@ public sealed class KnowledgeSystem : IWorldSystem
                     deceiverFactionId.Value, null),
                     SimulationLod.Local);
             }
+        }
+    }
+
+    // ---- 5C: Conflict auto-resolution ----
+
+    /// <summary>
+    /// Auto-resolve conflicts where the dominant fact leads by > 0.40 confidence.
+    /// The weaker fact is discredited noise — supersede it to prevent tedious manual investigation.
+    /// Close conflicts (spread < 0.40) remain for the player to investigate.
+    /// </summary>
+    private void AutoResolveConflicts(WorldState state, SimulationContext context,
+        IEventEmitter events, int tick)
+    {
+        foreach (var (holder, conflict) in state.Knowledge.GetAllConflicts().ToList())
+        {
+            if (conflict.IsResolved) continue;
+            if (conflict.ConfidenceSpread <= 0.40f) continue;
+
+            var dominant = conflict.DominantFact;
+            if (dominant is null) continue;
+
+            // Supersede all non-dominant facts
+            foreach (var fact in conflict.CompetingFacts)
+            {
+                if (fact.Id == dominant.Id) continue;
+                if (fact.IsSuperseded) continue;
+                state.Knowledge.MarkSuperseded(holder, fact, tick);
+            }
+
+            var lod = holder is PlayerHolder ? SimulationLod.Local : SimulationLod.Distant;
+            _emitter.Emit(new KnowledgeConflictResolved(
+                state.Date, lod, conflict.SubjectKey, dominant.Id, holder), lod);
         }
     }
 
