@@ -129,8 +129,7 @@ public class ChaosMonkeyTests
         // CHAOS: Plague everywhere
         foreach (var port in state.Ports.Values)
         {
-            port.Conditions |= PortConditionFlags.Plague;
-            port.EpidemicTicksRemaining = 30;
+            port.StartEpidemic(30);
         }
         _output.WriteLine($"Infected {state.Ports.Count} ports with plague");
 

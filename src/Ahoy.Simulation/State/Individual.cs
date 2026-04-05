@@ -57,6 +57,16 @@ public sealed class Individual
     public int CurrentGold { get; set; }
 
     // --- Captivity (Crisis 1: VIP Abduction) ---
-    /// <summary>Non-null when this individual is held captive by another.</summary>
-    public IndividualId? CaptorId { get; set; }
+    /// <summary>Non-null when this individual is held captive by another. Use Capture()/Release().</summary>
+    public IndividualId? CaptorId { get; private set; }
+
+    /// <summary>Capture this individual. They must be alive.</summary>
+    public void Capture(IndividualId captorId)
+    {
+        if (!IsAlive) throw new InvalidOperationException("Cannot capture a dead individual");
+        CaptorId = captorId;
+    }
+
+    /// <summary>Release this individual from captivity.</summary>
+    public void Release() => CaptorId = null;
 }

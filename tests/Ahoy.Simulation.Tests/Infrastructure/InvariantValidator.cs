@@ -139,19 +139,40 @@ public static class InvariantValidator
             v.Add("All factions are bankrupt — economic deadlock");
 
         // At least one captained ship should be moving (not all permanently docked)
-        // Uncaptained ships can't depart on their own — only count ships with living captains
-        var captainedShips = state.Ships.Values
-            .Where(s => s.CaptainId.HasValue
-                && state.Individuals.TryGetValue(s.CaptainId.Value, out var cap) && cap.IsAlive)
-            .ToList();
-        var captainedAtSea = captainedShips.Count(s => s.Location is not AtPort);
-        if (captainedShips.Count > 3 && captainedAtSea == 0)
-            v.Add($"No captained ships at sea ({captainedShips.Count} captained ships, all docked) — world movement has stopped");
+        var totalShips = state.Ships.Count;
+        var shipsWithCaptain = state.Ships.Values.Count(s => s.CaptainId.HasValue);
+        var shipsWithLivingCaptain = state.Ships.Values
+            .Count(s => s.CaptainId.HasValue
+                && state.Individuals.TryGetValue(s.CaptainId.Value, out var cap) && cap.IsAlive);
+        var captainedAtSea = state.Ships.Values
+            .Count(s => s.CaptainId.HasValue
+                && state.Individuals.TryGetValue(s.CaptainId.Value, out var cap) && cap.IsAlive
+                && s.Location is not AtPort);
+        var shipsWithRoutes = state.Ships.Values.Count(s => s.Route is not null);
+
+        if (shipsWithLivingCaptain > 3 && captainedAtSea == 0)
+            v.Add($"World movement stopped: {totalShips} ships total, " +
+                  $"{shipsWithCaptain} with captain, {shipsWithLivingCaptain} with living captain, " +
+                  $"{captainedAtSea} at sea, {shipsWithRoutes} with active routes");
 
         // Average port prosperity should be above survival floor
-        var avgProsperity = state.Ports.Values.Average(p => p.Prosperity);
-        if (avgProsperity < 5f)
-            v.Add($"Average port prosperity critically low: {avgProsperity:F1} — economic collapse");
+        if (state.Ports.Count > 0)
+        {
+            var avgProsperity = state.Ports.Values.Average(p => p.Prosperity);
+            if (avgProsperity < 5f)
+            {
+                var worstPorts = state.Ports.Values
+                    .OrderBy(p => p.Prosperity)
+                    .Take(3)
+                    .Select(p => $"{p.Name}={p.Prosperity:F0}")
+                    .ToList();
+                var activeEpidemics = state.Ports.Values.Count(p => p.Conditions.HasFlag(PortConditionFlags.Plague));
+                var activeBlockades = state.Ports.Values.Count(p => p.Conditions.HasFlag(PortConditionFlags.Blockaded));
+                v.Add($"Average port prosperity critically low: {avgProsperity:F1}. " +
+                      $"Worst: {string.Join(", ", worstPorts)}. " +
+                      $"Active epidemics: {activeEpidemics}, blockades: {activeBlockades}");
+            }
+        }
     }
 
     private static IEnumerable<KnowledgeHolderId> GetAllHolders(WorldState state)

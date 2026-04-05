@@ -62,11 +62,32 @@ public enum PursuitState
 /// </summary>
 public sealed class GoalPursuit
 {
+    private PursuitState _state = PursuitState.Active;
+
     public required NpcGoal ActiveGoal { get; init; }
-    public PursuitState State { get; set; } = PursuitState.Active;
+    public PursuitState State { get => _state; init => _state = value; }
 
     /// <summary>Number of consecutive ticks the NPC has been unable to make progress.</summary>
-    public int TicksStalled { get; set; }
+    public int TicksStalled { get; private set; }
 
     public required int ActivatedOnTick { get; init; }
+
+    /// <summary>Transition to Stalled state. Resets stall counter.</summary>
+    public void Stall() { _state = PursuitState.Stalled; TicksStalled = 1; }
+
+    /// <summary>Increment stall counter. Returns true if threshold exceeded.</summary>
+    public bool TickStall(int abandonThreshold = 14)
+    {
+        TicksStalled++;
+        if (TicksStalled > abandonThreshold)
+        {
+            _state = PursuitState.Abandoned;
+            return true;
+        }
+        return false;
+    }
+
+    public void Complete() => _state = PursuitState.Completed;
+    public void Abandon() => _state = PursuitState.Abandoned;
+    public void Activate() => _state = PursuitState.Active;
 }

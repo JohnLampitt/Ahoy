@@ -159,8 +159,7 @@ public class PetriDishTests
         var (engine, state) = builder.BuildWithState();
 
         // Manually set epidemic
-        state.Ports[port].Conditions |= PortConditionFlags.Plague;
-        state.Ports[port].EpidemicTicksRemaining = 30;
+        state.Ports[port].StartEpidemic(30);
 
         // Create a player ship docked with medicine
         var playerShipId = new ShipId(Guid.NewGuid());

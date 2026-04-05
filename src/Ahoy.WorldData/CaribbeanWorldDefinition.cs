@@ -363,10 +363,9 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         );
 
         // Seed starting PortConditionFlags — Famine in two ports to drive contract generation
-        state.Ports[merida].Conditions   = PortConditionFlags.Famine;
-        state.Ports[cumana].Conditions   = PortConditionFlags.Famine;
-        state.Ports[montserrat].Conditions = PortConditionFlags.Plague;
-        state.Ports[montserrat].EpidemicTicksRemaining = 30;
+        state.Ports[merida].SetCondition(PortConditionFlags.Famine, true);
+        state.Ports[cumana].SetCondition(PortConditionFlags.Famine, true);
+        state.Ports[montserrat].StartEpidemic(30);
 
         return new PortIds(
             veracruz, campeche, merida, havana, santiagoDeCuba,

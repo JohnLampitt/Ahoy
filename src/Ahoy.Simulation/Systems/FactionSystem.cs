@@ -162,9 +162,9 @@ public sealed class FactionSystem : IWorldSystem
             }
 
             if (hostileStrength > defenseRating)
-                port.Conditions |= PortConditionFlags.Blockaded;
+                port.SetCondition(PortConditionFlags.Blockaded, true);
             else
-                port.Conditions &= ~PortConditionFlags.Blockaded;
+                port.SetCondition(PortConditionFlags.Blockaded, false);
         }
     }
 

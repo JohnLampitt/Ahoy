@@ -80,8 +80,7 @@ public sealed class EconomySystem : IWorldSystem
             if (port.Conditions.HasFlag(PortConditionFlags.Plague)) continue;
             if (_rng.NextDouble() < 0.0005) // 0.05% — very rare but devastating
             {
-                port.Conditions |= PortConditionFlags.Plague;
-                port.EpidemicTicksRemaining = 30;
+                port.StartEpidemic(30);
             }
         }
 
@@ -91,16 +90,8 @@ public sealed class EconomySystem : IWorldSystem
             if (!port.Conditions.HasFlag(PortConditionFlags.Plague)) continue;
 
             // Natural decay
-            if (port.EpidemicTicksRemaining.HasValue)
-            {
-                port.EpidemicTicksRemaining--;
-                if (port.EpidemicTicksRemaining <= 0)
-                {
-                    port.Conditions &= ~PortConditionFlags.Plague;
-                    port.EpidemicTicksRemaining = null;
-                    continue;
-                }
-            }
+            if (port.TickEpidemic())
+                continue;
 
             // Infect docked ships (10% per tick)
             foreach (var shipId in port.DockedShips)
@@ -123,8 +114,7 @@ public sealed class EconomySystem : IWorldSystem
 
             if (_rng.NextDouble() < 0.05)
             {
-                port.Conditions |= PortConditionFlags.Plague;
-                port.EpidemicTicksRemaining = 30;
+                port.StartEpidemic(30);
             }
         }
     }

@@ -52,8 +52,46 @@ public sealed class Port
     // --- Flags ---
     public bool IsPirateHaven { get; set; }
     public bool IsNeutral { get; set; }
-    public PortConditionFlags Conditions { get; set; } = PortConditionFlags.None;
+    public PortConditionFlags Conditions { get; private set; } = PortConditionFlags.None;
 
     /// <summary>Ticks remaining until epidemic clears naturally. Null = no active epidemic timer.</summary>
-    public int? EpidemicTicksRemaining { get; set; }
+    public int? EpidemicTicksRemaining { get; private set; }
+
+    // ---- Condition mutation methods (enforce correlated invariants) ----
+
+    /// <summary>Start an epidemic at this port. Sets Plague flag and decay timer together.</summary>
+    public void StartEpidemic(int durationTicks = 30)
+    {
+        Conditions |= PortConditionFlags.Plague;
+        EpidemicTicksRemaining = durationTicks;
+    }
+
+    /// <summary>Clear the epidemic. Removes Plague flag and timer together.</summary>
+    public void ClearEpidemic()
+    {
+        Conditions &= ~PortConditionFlags.Plague;
+        EpidemicTicksRemaining = null;
+    }
+
+    /// <summary>Decrement epidemic timer. Returns true if epidemic expired this tick.</summary>
+    public bool TickEpidemic()
+    {
+        if (!EpidemicTicksRemaining.HasValue) return false;
+        EpidemicTicksRemaining--;
+        if (EpidemicTicksRemaining <= 0)
+        {
+            ClearEpidemic();
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>Set or clear a non-epidemic condition flag.</summary>
+    public void SetCondition(PortConditionFlags flag, bool active)
+    {
+        if (flag == PortConditionFlags.Plague)
+            throw new InvalidOperationException("Use StartEpidemic()/ClearEpidemic() for Plague flag");
+        if (active) Conditions |= flag;
+        else Conditions &= ~flag;
+    }
 }

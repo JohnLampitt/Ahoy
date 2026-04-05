@@ -264,8 +264,7 @@ public sealed class QuestSystem : IWorldSystem
             // Crisis 2: Medicine delivery cures epidemic
             if (good == TradeGood.Medicine && port.Conditions.HasFlag(PortConditionFlags.Plague))
             {
-                port.Conditions &= ~PortConditionFlags.Plague;
-                port.EpidemicTicksRemaining = null;
+                port.ClearEpidemic();
 
                 // Cure all infected crew in docked ships
                 foreach (var dockedShipId in port.DockedShips)
@@ -309,10 +308,8 @@ public sealed class QuestSystem : IWorldSystem
                     break;
 
                 case PursuitState.Stalled:
-                    pursuit.TicksStalled++;
-                    if (pursuit.TicksStalled > StallAbandonThreshold)
+                    if (pursuit.TickStall(StallAbandonThreshold))
                     {
-                        pursuit.State = PursuitState.Abandoned;
                         EmitPursuitAbandoned(npcId, pursuit, state, events);
                     }
                     break;
@@ -445,7 +442,7 @@ public sealed class QuestSystem : IWorldSystem
     {
         if (!state.Individuals.TryGetValue(npcId, out var npc) || !npc.IsAlive)
         {
-            pursuit.State = PursuitState.Abandoned;
+            pursuit.Abandon();
             return;
         }
 
@@ -472,7 +469,7 @@ public sealed class QuestSystem : IWorldSystem
         PatrolRegionGoal goal, GoalPursuit pursuit, WorldState state, SimulationContext context)
     {
         var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
-        if (ship is null) { pursuit.State = PursuitState.Abandoned; return; }
+        if (ship is null) { pursuit.Abandon(); return; }
 
         var currentRegion = state.GetShipRegion(ship.Id);
 
@@ -499,7 +496,7 @@ public sealed class QuestSystem : IWorldSystem
 
         // Patrol continues until war ends or goal abandoned (30 tick limit)
         if (context.TickNumber - pursuit.ActivatedOnTick > 30)
-            pursuit.State = PursuitState.Completed;
+            pursuit.Complete();
     }
 
     private static void TickRansomPursuit(IndividualId npcId, Individual npc,
@@ -507,7 +504,7 @@ public sealed class QuestSystem : IWorldSystem
         SimulationContext context, IEventEmitter events)
     {
         var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
-        if (ship is null) { pursuit.State = PursuitState.Abandoned; return; }
+        if (ship is null) { pursuit.Abandon(); return; }
 
         // Route toward a port controlled by the target faction
         if (ship.Route is null)
@@ -518,7 +515,7 @@ public sealed class QuestSystem : IWorldSystem
                 ship.Route = new PortRoute(targetPort.Id);
             else
             {
-                pursuit.State = PursuitState.Stalled;
+                pursuit.Stall();
                 return;
             }
         }
@@ -530,8 +527,8 @@ public sealed class QuestSystem : IWorldSystem
         {
             // Ransom timeout — release captive
             if (state.Individuals.TryGetValue(goal.CaptiveId, out var captive))
-                captive.CaptorId = null;
-            pursuit.State = PursuitState.Abandoned;
+                captive.Release();
+            pursuit.Abandon();
         }
     }
 
@@ -544,7 +541,7 @@ public sealed class QuestSystem : IWorldSystem
         var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
         if (ship is null)
         {
-            pursuit.State = PursuitState.Abandoned;
+            pursuit.Abandon();
             return;
         }
 
@@ -557,8 +554,7 @@ public sealed class QuestSystem : IWorldSystem
 
         if (intelFact is null || intelFact.Confidence < IntelConfidenceFloor)
         {
-            pursuit.State = PursuitState.Stalled;
-            pursuit.TicksStalled = 1;
+            pursuit.Stall();
             ship.Route = null; // clear pursuit route, fall back to normal routing
             return;
         }
@@ -601,7 +597,7 @@ public sealed class QuestSystem : IWorldSystem
 
         if (fulfilled)
         {
-            pursuit.State = PursuitState.Completed;
+            pursuit.Complete();
             npc.CurrentGold += contract.GoldReward;
             ship.Route = null;
 
