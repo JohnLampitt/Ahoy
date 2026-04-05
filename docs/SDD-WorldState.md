@@ -366,9 +366,8 @@ public sealed class PlayerState
     // Reputation with each faction (-100 to 100)
     public Dictionary<FactionId, int> FactionReputations { get; } = new();
 
-    // What the player knows about the world — and when they learned it
-    // This is the information delay mechanic in data form
-    public List<KnownEvent> KnowledgeLog { get; } = new();
+    // Player knowledge is held in KnowledgeStore via PlayerHolder.
+    // See SDD-KnowledgeSystem §2.4 — KnownEvent/KnowledgeLog removed in v0.2.
 }
 ```
 
@@ -444,31 +443,17 @@ public interface IEventEmitter
 
 The `SimulationEngine` provides a concrete implementation that collects events during a tick, then dispatches them after all systems have run.
 
-### 5.3 KnownEvent — The Information Delay Mechanic
+### 5.3 ~~KnownEvent~~ (Removed — replaced by KnowledgeStore)
 
-When the `InformationPropagationSystem` runs, it decides which events reach the player and when — based on distance from the player's current region and how quickly information travels.
-
-```csharp
-// Ahoy.Simulation/State/KnownEvent.cs
-
-public sealed class KnownEvent
-{
-    // The underlying world event that occurred
-    public WorldEvent Event      { get; init; }
-
-    // When the player learned of it (may be days/weeks after OccurredAt)
-    public WorldDate LearnedAt   { get; init; }
-
-    // Where the player was when they learned it
-    public RegionId LearnedIn    { get; init; }
-
-    // How accurate is this information? Distant events may be garbled.
-    // 1.0 = certain, 0.0 = pure rumour
-    public float Confidence      { get; init; }
-}
-```
-
-The gap between `Event.OccurredAt` and `LearnedAt` is the information delay. A `Confidence` below 1.0 signals that the event details may have been corrupted in transit — useful for surfacing inaccurate rumours as a gameplay mechanic.
+> **v0.2 note:** `KnownEvent` and `PlayerState.KnowledgeLog` have been replaced
+> by the unified `KnowledgeStore` with `KnowledgeFact` entries held in
+> `PlayerHolder`. The information delay mechanic (confidence decay, hop penalties,
+> disinformation) is now handled by `KnowledgeFact.Confidence` and the
+> propagation pipeline. See `SDD-KnowledgeSystem` §2 for the full model.
+>
+> The same `KnowledgeStore` also drives NPC decisions via `IndividualHolder` and
+> `ShipHolder` — no actor reads ground truth. See `SDD-QuestSystem` §5
+> (EpistemicResolver) for how NPCs act on held knowledge.
 
 ---
 
@@ -494,11 +479,13 @@ Order matters — each system sees the state left by those before it.
 | Order | System | Responsibility |
 |---|---|---|
 | 1 | `WeatherSystem` | Update weather state per region; flag severe events |
-| 2 | `ShipMovementSystem` | Advance ships along routes; handle arrivals |
+| 2 | `ShipMovementSystem` | Advance ships along routes; handle arrivals; NPC routing reads NpcPursuits |
 | 3 | `EconomySystem` | Update supply/demand; recalculate prices; move trade goods |
 | 4 | `FactionSystem` | Evaluate faction goals; update relationships; take actions |
-| 5 | `EventPropagationSystem` | Cascade world events into downstream state changes |
-| 6 | `InformationPropagationSystem` | Decide what the player learns today; populate KnowledgeLog |
+| 5 | `IndividualLifecycleSystem` | NPC career events, governor tours, agent replacement |
+| 6 | `EventPropagationSystem` | Cascade world events into downstream state changes |
+| 7 | `KnowledgeSystem` | Propagate facts, decay confidence, detect conflicts, Stall & Leak gossip |
+| 8 | `QuestSystem` | Player quest lifecycle, NPC goal assignment + EpistemicResolver execution |
 
 ### 6.3 SimulationEngine
 

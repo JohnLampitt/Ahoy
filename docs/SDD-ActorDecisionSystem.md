@@ -682,7 +682,60 @@ At `Distant` LOD, the situation summary is naturally coarser (fewer precise fact
 
 ---
 
-## 15. Open Questions
+## 15. NPC Goal Selection — Second LLM Call Site
+
+> **Added v0.3** — reflects Group 5 architectural pivot (EpistemicResolver + NpcGoal).
+
+The Actor Decision System (§1–14) describes LLM usage at **inflection points** —
+moments where an NPC reacts to a situation (player arrival, faction crisis, etc.).
+Group 5 introduces a **second, distinct LLM call site**: strategic goal selection
+for NPC autonomy.
+
+### When it fires
+
+When an NPC's `GoalPursuit` enters the `Pondering` state (on spawn, goal
+completion, or goal abandonment), `QuestSystem` (system 8) dispatches an async
+request via `DecisionQueue`.
+
+### How it differs from inflection points
+
+| | Inflection Points (§3–10) | Goal Selection (§15) |
+|---|---|---|
+| **Trigger** | External event (player arrives, faction crisis) | Internal state change (Pondering) |
+| **Subject** | Individual or Faction reacting to stimulus | Individual choosing what to pursue |
+| **Output** | `ActorDecisionMatrix` (base + interventions) | Structured goal assignment (`NpcGoal`) |
+| **Player interaction** | Intervention window (bribe, threaten, etc.) | None — player competes, doesn't intervene |
+| **Stalling** | `PendingDecision` on Individual/Faction | `GoalPursuit.State = Pondering` |
+
+### Prompt payload
+
+The engine synthesises the NPC's epistemic reality (not ground truth):
+- **Identity:** Role, PersonalityTraits (Greed, Boldness, Cunning, Loyalty)
+- **Knowledge:** Top 5 highest-confidence IndividualHolder facts
+- **Resources:** Ship status (hull, crew, cargo), CurrentGold
+- **Context:** Current location, active knowledge conflicts
+
+### Fallback guarantee
+
+Rule-based scoring assigns a goal immediately on the same tick (synchronous).
+LLM response can override on the next tick if it arrives. The world never
+stalls waiting for LLM responses — same pattern as `DecisionQueue` for
+inflection points.
+
+### Invariant
+
+**The LLM selects goals (the "why"). The EpistemicResolver executes them
+deterministically (the "how"). The simulation validates outcomes mechanically
+(the "what happened").** See `SDD-QuestSystem` §6 for full detail.
+
+### Implementation status
+
+Deferred until the rule-based goal selection path is proven. Interfaces will be
+stubbed during Group 5B implementation.
+
+---
+
+## 16. Open Questions
 
 - [ ] Should multiple simultaneous inflection points for the same faction/individual be coalesced into a single decision with a richer context, or queued sequentially? Coalescing produces better LLM output but requires more complex trigger management.
 - [ ] Prompt language and tone — how much historical flavour should the system prompt include? More flavour produces more period-appropriate rationale; less flavour produces cleaner, more reliable output.
