@@ -144,12 +144,14 @@ public static SimulationEngine BuildEngine(bool useLlm = true)
     // Tick pipeline — order is authoritative
     var systems = new IWorldSystem[]
     {
-        new WeatherSystem(),
-        new ShipMovementSystem(),
-        new EconomySystem(),
-        new FactionSystem(decisionQueue),
-        new EventPropagationSystem(propagationRules),
-        new KnowledgeSystem(),
+        new WeatherSystem(rng),              // Step 1
+        new ShipMovementSystem(rng),         // Step 2 — reads NpcPursuits for goal-driven routing
+        new EconomySystem(rng),              // Step 3
+        new FactionSystem(rng),              // Step 4
+        new IndividualLifecycleSystem(rng),  // Step 5
+        new EventPropagationSystem(emitter), // Step 6
+        new KnowledgeSystem(emitter, rng),   // Step 7 — Stall & Leak gossip injection
+        new QuestSystem(),                   // Step 8 — player quests + NPC goal assignment/EpistemicResolver
     };
 
     var continuitySystem = new ContinuitySystem(new EconomySystem(), new RuleBasedDecisionProvider());
@@ -534,9 +536,12 @@ Building this before any graphical frontend keeps the feedback loop tight.
 ### Known gaps identified across SDDs
 
 - `SDD-WorldState` — `FactionGoal` subtypes defined in `SDD-FactionSystem`; cross-reference needed
+- `SDD-WorldState` — `NpcPursuits` (`Dictionary<IndividualId, GoalPursuit>`) not yet added to WorldState model section
 - `SDD-EconomySystem` — `MerchantKnowledge` replaced by `KnowledgeStore` queries; the SDD has not been updated to reflect this fully
 - `SDD-KnowledgeSystem` — `Individual.MerchantKnowledge` removal noted but `MerchantState` (desperation tracking) not yet specified on `Individual`
 - `SDD-ActorDecisionSystem` — `ISyncActorDecisionProvider.ResolveMatrix()` added; the fallback interface needs updating
+- `SDD-ActorDecisionSystem` — LLM goal selection (Pondering → NpcGoal) is a second LLM call site not yet documented in that SDD
+- `SDD-QuestSystem` — `GoalModels.cs`, `ShipRoute` union type, `NpcPursuitAbandoned` / `NpcClaimedContract` events not yet implemented
 
 ---
 
@@ -570,7 +575,14 @@ Phase 4 — Advanced Systems
     Full KnowledgeSystem (guarding, trading, broker inventories)
     Full EventPropagationSystem (all rule categories)
 
-Phase 5 — Player Interaction
+Phase 5 — Knowledge-Driven Living World (Group 5)
+    5A: NPC knowledge-gated decisions (IndividualHolder routing, KnowledgeStore in decisions)
+    5E: Claim circulation (RouteHazard seeding, allegiance discovery, faction intention leaks)
+    5B: NPC goal pursuit (NpcGoal + GoalPursuit, ShipRoute union, EpistemicResolver, Stall & Leak)
+    5C: Knowledge conflict resolution (player surfacing, NPC conflict behaviour)
+    LLM goal selection (Pondering state async dispatch — deferred until rule-based proven)
+
+Phase 6 — Player Interaction
     PlayerCommand application logic
     Player knowledge queries
     Intervention mechanics

@@ -1,172 +1,160 @@
 # Ahoy — System Design: Quest System
 
 > **Status:** Living document.
-> **Version:** 0.1
+> **Version:** 0.2 — rewritten for EpistemicResolver + NpcGoal architecture (v0.1 template system removed)
 > **Depends on:** SDD-KnowledgeSystem.md, SDD-WorldState.md, SDD-Architecture.md
 
 ---
 
 ## 1. Overview
 
-Quests are the primary vehicle for emergent narrative in Ahoy. Rather than scripted story arcs, quests are **knowledge-triggered story beats** — short, self-contained opportunities that surface when the player's information about the world reaches a threshold of credibility or urgency.
+Quests are the primary vehicle for emergent narrative in Ahoy. Rather than scripted story arcs or predefined templates, quests are **knowledge-triggered story beats** — opportunities that surface when an actor's knowledge about the world reaches a threshold of credibility or urgency.
 
 The quest system sits at the intersection of the simulation and narrative layers:
 
 - **The simulation defines what is true** (world state, faction standings, ship positions, port control)
-- **The knowledge system defines what the player knows** (facts with confidence scores that decay)
-- **The quest system bridges the two** — detecting when the player's knowledge creates a meaningful choice, presenting it, and writing the outcome back into the world as new `WorldEvent`s
+- **The knowledge system defines what actors know** (facts with confidence scores that decay)
+- **The quest system bridges the two** — detecting when knowledge creates a meaningful opportunity, enabling both players and NPCs to act on it
 
 ### Design Goals
 
-- **Knowledge-gated, not timer-gated** — quests open and close based on the player's information state, not arbitrary timers
-- **Outcomes are simulation-real** — every branch choice produces `WorldEvent`s that propagate through the full simulation pipeline; the world reacts
+- **Knowledge-gated, not timer-gated** — opportunities open and close based on epistemic state, not arbitrary timers
+- **Outcomes are simulation-real** — every action produces `WorldEvent`s that propagate through the full simulation pipeline
+- **Unified player/NPC model** — the same epistemic mechanisms drive both player quests and NPC goal pursuit
 - **Disinformation is first-class** — a quest can be triggered by a planted lie; acting on false intelligence has real consequences
-- **Expiry is natural** — if the player ignores a quest, confidence decay closes the window without special expiry logic
-- **LLM-augmentable but not LLM-dependent** — all structural logic is deterministic; the LLM renders flavour text and is called at most twice per quest (instantiation + dialogue)
+- **Expiry is natural** — if an actor ignores an opportunity, confidence decay closes the window without special expiry logic
+- **LLM-augmentable but not LLM-dependent** — all structural logic is deterministic; the LLM influences NPC goal *selection* and renders narrative flavour
+
+### Design History
+
+v0.1 used a template-based architecture (`QuestTemplate`, `QuestBranch`, `QuestCondition` tree, `QuestInstance`, `QuestStore`). This was implemented, tested, and **deliberately removed** — templates produced predictable, scripted-feeling behaviour rather than emergent narrative. The surviving `ContractQuestInstance` (knowledge-triggered, no predefined structure) demonstrated that the knowledge system's confidence thresholds are sufficient to create quest-like progression without templates.
+
+v0.2 generalises this insight: the EpistemicResolver pattern replaces templates entirely. "Phases" emerge from knowledge confidence gaps, not predefined state machines.
 
 ---
 
 ## 2. Architecture
 
-The quest system is **System 7** in the simulation tick pipeline, running after `KnowledgeSystem`:
+The quest system is **System 8** in the simulation tick pipeline, running after `KnowledgeSystem`:
 
 ```
 Weather(1) → ShipMovement(2) → Economy(3) → Faction(4) →
-EventPropagation(5) → Knowledge(6) → Quest(7)
+IndividualLifecycle(5) → EventPropagation(6) → Knowledge(7) → Quest(8)
 ```
 
-This ordering ensures quest trigger evaluation sees fully-updated player knowledge for the current tick, including propagated gossip and newly ingested events.
+This ordering ensures quest evaluation sees fully-updated knowledge for the current tick, including propagated gossip and newly ingested events.
 
 ### Project boundaries
 
 | Component | Project |
 |---|---|
-| `QuestModels.cs` — templates, instances, condition tree | `Ahoy.Simulation` |
-| `QuestStore.cs` — active/history store | `Ahoy.Simulation` |
-| `QuestSystem.cs` — tick evaluation | `Ahoy.Simulation` |
-| `CaribbeanQuestTemplates.cs` — hardcoded template definitions | `Ahoy.WorldData` |
-| Console `quests` / `choose` commands | `Ahoy.Console` |
-
-`Ahoy.WorldData` already depends on `Ahoy.Simulation`, so template definitions can reference all simulation types. `Ahoy.Simulation` does not reference `Ahoy.WorldData` — templates are injected at construction time via `SimulationEngine.BuildEngine(questTemplates: ...)`.
+| `QuestModels.cs` — contract quest instances | `Ahoy.Simulation/Quests` |
+| `QuestStore.cs` — active/history store with cooldowns | `Ahoy.Simulation/Quests` |
+| `GoalModels.cs` — NpcGoal hierarchy + GoalPursuit state machine | `Ahoy.Simulation/State` (new) |
+| `QuestSystem.cs` — tick evaluation, player quests + NPC goal assignment | `Ahoy.Simulation/Systems` |
+| Console `knowledge` / `quests` commands | `Ahoy.Console` |
 
 ---
 
 ## 3. Data Model
 
-### 3.1 QuestTemplate
+### 3.1 Player Quests — ContractQuestInstance
 
-A `QuestTemplate` is a static definition — the blueprint for a type of quest. It is created once at startup.
+Player quests remain `ContractQuestInstance` — knowledge-triggered, flat lifecycle:
 
 ```csharp
-public sealed class QuestTemplate
+public sealed class ContractQuestInstance
 {
-    public required QuestTemplateId Id { get; init; }
-    public required string Title { get; init; }
-    public required string Synopsis { get; init; }
-
-    // Condition tree evaluated against the player's non-superseded facts each tick
-    public required QuestCondition TriggerCondition { get; init; }
-
-    // Selects the specific facts that caused activation (for display)
-    public required Func<IReadOnlyList<KnowledgeFact>, IReadOnlyList<KnowledgeFact>>
-        TriggerFactSelector { get; init; }
-
-    public required IReadOnlyList<QuestBranch> Branches { get; init; }
-
-    // Returns true if this instance should expire given current world state
-    public required Func<QuestInstance, WorldState, bool> ExpiryPredicate { get; init; }
-
-    // Fallback flavour text (overridden by LLM-generated content on QuestInstance)
-    public string? NpcName { get; init; }
-    public string? DefaultNpcDialogue { get; init; }
-
-    public FactionId? AssociatedFactionId { get; init; }
-    public bool AllowDuplicateInstances { get; init; }
-}
-```
-
-### 3.2 QuestCondition tree
-
-Trigger conditions are a composable tree of predicates evaluated against the player's live facts:
-
-```
-QuestCondition
-  ├── FactCondition(Func<KnowledgeFact, bool> Predicate, string Description)
-  ├── AndCondition(IReadOnlyList<QuestCondition> Children)
-  └── OrCondition(IReadOnlyList<QuestCondition> Children)
-```
-
-Examples:
-```csharp
-// A1 — Bait and Bloodhound
-new FactCondition(
-    f => f.Claim is ShipLocationClaim && f.Confidence >= 0.60f,
-    "ShipLocationClaim with confidence >= 0.60"
-)
-
-// Compound example: faction weakened AND player knows their port
-new AndCondition([
-    new FactCondition(f => f.Claim is FactionStrengthClaim fs
-        && fs.NavalStrength < 3, "Faction strength critical"),
-    new FactCondition(f => f.Claim is PortControlClaim, "Port control known"),
-])
-```
-
-### 3.3 QuestBranch
-
-Each branch represents one player choice. The `OutcomeEvents` lambda is evaluated at resolution time (not at trigger time) so it can capture current world state.
-
-```csharp
-public sealed class QuestBranch
-{
-    public required string BranchId { get; init; }
-    public required string Label { get; init; }
-    public required string Description { get; init; }
-
-    // Called at resolution time — returns events injected into the tick emitter
-    public required Func<WorldState, IReadOnlyList<WorldEvent>> OutcomeEvents { get; init; }
-
-    // If non-null, activates this template on the next tick after resolution
-    public QuestTemplateId? NextQuestTemplateId { get; init; }
-}
-```
-
-### 3.4 QuestInstance
-
-A `QuestInstance` is a live, running quest — one activation of a template.
-
-```csharp
-public sealed class QuestInstance
-{
-    public QuestInstanceId Id { get; init; }         // short display ID
-    public required QuestTemplate Template { get; init; }
-    public QuestStatus Status { get; set; }           // Active | Completed | Expired | Failed
+    public QuestInstanceId Id { get; init; } = QuestInstanceId.New();
+    public required KnowledgeFactId ContractFactId { get; init; }
+    public required ContractClaim Contract { get; init; }
     public required WorldDate ActivatedDate { get; init; }
-    public required IReadOnlyList<KnowledgeFact> TriggerFacts { get; init; }
-
-    // LLM-filled flavour (null until wired — falls back to template defaults)
-    public string? LlmNpcName { get; set; }
-    public string? LlmDialogue { get; set; }
-
-    public QuestBranch? ChosenBranch { get; set; }
+    public ContractQuestStatus Status { get; set; } = ContractQuestStatus.Active;
+    public string? NarrativePromptFragment { get; set; }
     public WorldDate? ResolvedDate { get; set; }
 }
+
+public enum ContractQuestStatus { Active, LostTrail, Fulfilled, TargetGone, Expired, ClaimedByNpc }
 ```
 
-### 3.5 QuestStore
+**Activation:** `ContractClaim` in `PlayerHolder` with confidence > 0.40 + separate intel fact about `TargetSubjectKey` with confidence > 0.50. `GoodsDelivered` contracts are self-validating (the contract *is* the intel).
 
-`WorldState` holds a `QuestStore` — pure data, mutated by `QuestSystem`.
+**Lifecycle:** `Active → Fulfilled | Expired | LostTrail → Active | ClaimedByNpc`. No predefined phases — the player's progression is driven by their knowledge state:
+
+| Confidence | Epistemic State | Player Experience |
+|---|---|---|
+| < 0.30 | Noise | Below awareness threshold |
+| 0.30–0.50 | Rumour | Investigation available, not yet actionable |
+| 0.50–0.70 | Actionable intel | Quest activates — can act, but risk of bad info |
+| 0.70–0.90 | Verified intelligence | High confidence — reliable basis for action |
+| > 0.90 | Direct observation | Ground truth equivalent |
+
+### 3.2 NPC Goals — NpcGoal + GoalPursuit
+
+NPC objectives are modelled as a separated goal/pursuit pair:
+
+```csharp
+// ---- The Behavioural Objective (immutable) ----
+
+public abstract record NpcGoal(Guid Id, IndividualId NpcId);
+
+public record FulfillContractGoal(
+    Guid Id, IndividualId NpcId,
+    ContractClaim Contract) : NpcGoal(Id, NpcId);
+
+// Future: TradeGoal, InvestigateGoal, FleeGoal, EscortGoal, etc.
+
+// ---- The Execution State Machine ----
+
+public enum PursuitState { Pondering, Active, Stalled, Completed, Abandoned }
+
+public sealed class GoalPursuit
+{
+    public required NpcGoal ActiveGoal { get; init; }
+    public PursuitState State { get; set; } = PursuitState.Active;
+    public int TicksStalled { get; set; }
+    public required int ActivatedOnTick { get; init; }
+}
+```
+
+**WorldState:**
+```csharp
+public Dictionary<IndividualId, GoalPursuit> NpcPursuits { get; } = new();
+```
+
+Lives on `WorldState` so `ShipMovementSystem` (system 2) can read pursuits when setting NPC routes, even though `QuestSystem` (system 8) creates them.
+
+### 3.3 ShipRoute Union Type
+
+Consolidates routing intent into a single discriminated union, replacing `PortId? RoutingDestination` + `OceanPoiId? PoiDestination`:
+
+```csharp
+public abstract record ShipRoute;
+public record PortRoute(PortId Destination) : ShipRoute;
+public record PursuitRoute(ShipId Target, RegionId LastKnownRegion) : ShipRoute;
+public record PoiRoute(OceanPoiId Poi) : ShipRoute;
+
+// On Ship:
+public ShipRoute? Route { get; set; }
+```
+
+`PursuitRoute` navigates to `LastKnownRegion` and performs a proximity check on arrival for interception. The active `GoalPursuit` determines which Route variant to set.
+
+### 3.4 QuestStore
+
+`WorldState` holds a `QuestStore` — pure data, mutated by `QuestSystem`:
 
 ```csharp
 public sealed class QuestStore
 {
-    public IReadOnlyList<QuestInstance> ActiveQuests { get; }
-    public IReadOnlyList<QuestInstance> History { get; }
+    public IReadOnlyList<ContractQuestInstance> ActiveContractQuests { get; }
+    public IReadOnlyList<ContractQuestInstance> History { get; }
 
-    public void AddActive(QuestInstance instance);
-    public void Resolve(QuestInstance instance);         // moves to history
-    public bool HasActiveInstance(QuestTemplateId id);  // prevents re-triggering
-    public bool HasCompleted(QuestTemplateId id);       // for chain guards
+    public void AddActive(ContractQuestInstance instance);
+    public void Resolve(ContractQuestInstance instance);
+    public bool HasActiveContractQuest(string targetSubjectKey);
+    public bool IsOnCooldown(string targetSubjectKey, WorldDate now);
+    public void RecordCooldown(string targetSubjectKey, WorldDate until);
 }
 ```
 
@@ -174,155 +162,150 @@ public sealed class QuestStore
 
 ## 4. Tick Lifecycle
 
-Each tick, `QuestSystem` runs in two phases:
+Each tick, `QuestSystem` runs in three phases:
 
-### Phase 1: Expiry check
-
-```
-for each active instance:
-    if ExpiryPredicate(instance, state) → mark Expired, move to history
-```
-
-Expiry predicates typically check:
-- `state.Date > instance.ActivatedDate.Advance(N)` — time limit
-- `player's trigger fact confidence has decayed below threshold` — natural knowledge decay
-
-### Phase 2: Trigger evaluation
+### Phase 1: Player quest maintenance
 
 ```
-for each registered template:
-    skip if already has active instance (unless AllowDuplicateInstances)
-    evaluate TriggerCondition against player's non-superseded facts
-    if true → create QuestInstance, add to ActiveQuests
+for each active ContractQuestInstance:
+    check fulfillment (TargetDestroyed, TargetDead, GoodsDelivered)
+    check LostTrail (intel confidence < 0.50)
+    check Expired (contract confidence < 0.20)
+    check ClaimedByNpc (NPC completed same contract)
 ```
 
-### Branch resolution (pre-tick command processing)
-
-Branch choices are applied as `ChooseQuestBranchCommand` at the **start of the next tick** (standard command pipeline):
+### Phase 2: Player quest activation
 
 ```
-ChooseQuestBranchCommand(QuestInstanceId, BranchId)
-    → find active instance
-    → find branch
-    → emit branch.OutcomeEvents(state) into TickEventEmitter
-    → mark instance Completed, move to history
+for each ContractClaim in PlayerHolder with confidence > 0.40:
+    skip if active quest exists for this target
+    skip if on cooldown
+    check intel gate (separate fact about target with confidence > 0.50)
+    if satisfied → create ContractQuestInstance
 ```
 
-Outcome events flow through the full event pipeline (EventPropagation → Knowledge), ensuring all NPCs, factions, and ports react to the consequence normally.
+### Phase 3: NPC goal assignment & pursuit tick
+
+```
+for each NPC with GoalPursuit in Pondering state:
+    assign goal via rule-based scoring (immediate)
+    dispatch async LLM request for potential override (see §6)
+
+for each NPC with GoalPursuit in Active state:
+    evaluate via EpistemicResolver (see §5)
+
+for each NPC with GoalPursuit in Stalled state:
+    increment TicksStalled
+    if TicksStalled > 14 → Abandoned, emit NpcPursuitAbandoned
+```
 
 ---
 
-## 5. Quest Templates
+## 5. EpistemicResolver — Goal Execution
 
-### 5.1 Hardcoded templates (v0.1)
+The EpistemicResolver is the pattern by which NPC goals are executed. It follows the epistemic breadcrumb trail: **what does the NPC know? What do they need to know? What's the next primitive action to close that gap?**
 
-Templates are currently static C# definitions in `Ahoy.WorldData/CaribbeanQuestTemplates.cs`. The two implemented templates are:
+The resolver doesn't know what kind of goal it's executing — it evaluates the NPC's knowledge state against the goal's requirements and returns the next action.
 
-**A1 — Bait and Bloodhound**
-- Trigger: `ShipLocationClaim` with confidence ≥ 0.60
-- Branches: intercept / sell intel / ignore
-- Expiry: 15 ticks after activation
-- Disinformation angle: the ship may be a Q-ship trap (not yet wired — `IsDisinformation` seeding pending)
+### For FulfillContractGoal:
 
-**A3 — The Governor's Quill**
-- Trigger: `IndividualWhereaboutsClaim` with confidence < 0.40 (rumour-grade)
-- Branches: deliver to French / sell to English / blackmail
-- Expiry: 30 ticks after activation
-- Note: trigger requires `IndividualWhereaboutsClaim` facts — not yet seeded by any system (see §8)
+1. **NPC knows target location** (high confidence `ShipLocationClaim`) → set `PursuitRoute`, state remains Active
+2. **NPC lacks target location** → trigger `InvestigateRemoteCommand` if NPC has gold, otherwise Stall
+3. **NPC in same region as target** → attempt resolution (stat check)
+4. **Informant TargetDead resolution:** abstracted stat-check gated by faction's `IntelligenceCapability`. Failure emits `AgentBurned`.
+5. **Target destroyed/dead by NPC** → emit `NpcClaimedContract`, pay NPC, state Completed
+6. **Intel confidence drops below 0.30** → state Stalled
 
-### 5.2 Template registry
+### Stall & Leak mechanic
 
-Templates are registered at composition root (`Program.cs`):
+When a `GoalPursuit` transitions to Abandoned:
 
-```csharp
-var engine = SimulationEngine.BuildEngine(world,
-    questTemplates: CaribbeanQuestTemplates.All);
-```
+1. Emit `NpcPursuitAbandoned` event
+2. `KnowledgeSystem` identifies the highest-confidence fact the NPC held regarding that goal
+3. Inject that fact into the `PortHolder` where the NPC is currently docked
+4. This generates tavern gossip: "Captain Vane abandoned his hunt for the Silver Galleon near Jamaica"
+5. Player (or other NPCs) can discover and act on this leaked intelligence
 
-`SimulationEngine.BuildEngine` accepts `IReadOnlyList<QuestTemplate>?` and defaults to empty if null, keeping the engine decoupled from world content.
+**AtSea edge case:** If abandonment triggers while the NPC is AtSea or EnRoute, the leak is deferred — the fact is held in ShipHolder and injected into the next PortHolder the NPC docks at. This is consistent with existing ship-carried gossip propagation: the `ArrivedThisTick` flag provides the trigger point.
 
 ---
 
-## 6. LLM Integration (future)
+## 6. LLM Integration
 
-The quest system is designed to accept LLM-generated content without changing its structural logic.
+The LLM participates at two distinct points, neither of which the simulation depends on.
 
-### Integration point
+### 6.1 NPC Goal Selection (Pondering state)
 
-When `QuestSystem` creates a new `QuestInstance`, it immediately has valid `Template.NpcName` and `Template.DefaultNpcDialogue` fallbacks. Optionally, before adding the instance to `ActiveQuests`, an async LLM call can be made:
+When an NPC enters `Pondering` state (spawn, goal completed, goal abandoned), QuestSystem dispatches an async request via `DecisionQueue`.
 
-```
-QuestSystem triggers
-    → build prompt: template + current world snapshot (port names, faction standings, prices)
-    → LLM call (async, non-blocking)
-    → on completion: set instance.LlmNpcName, instance.LlmDialogue
-    → instance added to ActiveQuests (with or without LLM content)
-```
+**Prompt payload** — the engine synthesises the NPC's epistemic reality:
+- **Identity:** Role, PersonalityTraits (Greed, Boldness, Cunning, Loyalty)
+- **Knowledge:** Top 5 highest-confidence IndividualHolder facts
+- **Resources:** Ship status (hull, crew, cargo), CurrentGold
+- **Context:** Current location, active knowledge conflicts
 
-The LLM receives:
-- `QuestTemplate.Synopsis` — the structural intent
-- Live world snapshot — actual port names, faction standings, relevant prices, named ships
-- Player's trigger facts — what specifically caused the quest to fire
+**Async callback:** LLM returns structured decision (e.g., `{"GoalType": "FulfillContract", "TargetSubject": "Ship:1234"}`). Callback queues the goal mutation for the next tick, transitioning Pondering → Active.
 
-The LLM returns:
-- A named NPC (e.g. "María de Alcázar, a half-drunk cartographer")
-- Opening dialogue specific to the world state
-- Optionally: branch-specific dialogue variations
+**Fallback guarantee:** Rule-based scoring assigns a goal immediately on the same tick (synchronous). LLM response can override on the next tick. World never stalls.
 
-### Constraint
+### 6.2 Player Quest Narrative (optional)
 
-**The LLM never determines world truth.** It renders flavour text only. All causal consequences flow back as `WorldEvent`s through deterministic code. The LLM is a content renderer, not a world engine.
+When `QuestSystem` creates a new `ContractQuestInstance`, it generates a `NarrativePromptFragment` from the contract's archetype and world context. This is a structural description the LLM can use to generate flavour text. The LLM is a content renderer — it does not determine quest structure or outcomes.
 
----
+### 6.3 LLM Invariant
 
-## 7. Composability
+**The LLM selects goals (the "why"). The EpistemicResolver executes them deterministically (the "how"). The simulation validates outcomes mechanically (the "what happened").** The LLM can influence what an NPC *wants* to do. It never influences what *actually happens* when they try.
 
-### 7.1 Quest chaining
-
-A branch's `NextQuestTemplateId` field allows chains: completing one quest can directly trigger another template's evaluation next tick. This is used for political arcs where one decision opens a follow-on opportunity.
-
-### 7.2 Condition composability
-
-`AndCondition` and `OrCondition` allow complex multi-fact triggers without per-template boilerplate. For example, a quest requiring both knowledge of a port's weakness AND a faction's naval disposition:
-
-```csharp
-new AndCondition([
-    new FactCondition(f => f.Claim is PortControlClaim pc
-        && state.Ports[pc.Port].Prosperity < 30, "Port in crisis"),
-    new FactCondition(f => f.Claim is FactionStrengthClaim fs
-        && fs.NavalStrength < 5, "Faction weakened"),
-])
-```
-
-### 7.3 Phase graph (future)
-
-The current model is a flat state machine: `Active → Completed | Expired | Failed`. A future phase graph would model quests as a directed graph of phases (`Verify → Contact → Deliver → Resolve`), with knowledge-conditioned transitions between phases. This is not implemented in v0.1 — flat templates cover the first 12 designed quests adequately.
+Without LLM: NPCs behave rationally given their knowledge and role. The world is alive but predictable.
+With LLM: NPCs become characters rather than optimisers. The world is alive and surprising.
 
 ---
 
-## 8. Known Gaps (v0.1)
+## 7. NPC Competition
+
+The player competes with NPCs for bounties. If an NPC fulfils a contract first, the player's quest expires with status `ClaimedByNpc`. The `NpcClaimedContract` event carries the NPC's identity so the console can surface: "Captain Vane claimed the bounty on the Silver Galleon."
+
+Player receives no compensation — "you were too slow" is the intended experience. The world does not wait.
+
+The player can also sell intel to NPCs (via existing `SellFactCommand`) to point them at targets — or misdirect them with bad intel.
+
+### Eligible NPC roles
+
+| Role | Contract Types | Resolution |
+|---|---|---|
+| PirateCaptain | TargetDestroyed | Naval combat (stat check) |
+| NavalOfficer | TargetDestroyed | Naval combat (stat check) |
+| Privateer | TargetDestroyed | Naval combat (stat check) |
+| Informant | TargetDead only | Assassination stat-check gated by IntelligenceCapability |
+
+Smugglers and PortMerchants excluded — economically motivated, combat-averse.
+
+---
+
+## 8. Known Gaps
 
 | Gap | Impact | Resolution |
 |---|---|---|
-| `IndividualWhereaboutsClaim` never seeded | Quest A3 never triggers | Seed initial governor location facts in `CaribbeanWorldDefinition`, or emit `IndividualMoved` events when governors travel |
-| `IsDisinformation` never set on facts | Disinformation quests can't distinguish planted from genuine facts | Wire disinformation seeding into FactionSystem intelligence operations |
-| No `QuestEvent` emitted on trigger/resolution | Frontend can't react to quest lifecycle | Add `QuestActivated` / `QuestResolved` world events, or expose via separate callback |
-| Quest ID display uses short prefix | `choose` command requires knowing the ID | Add `choose <n>` shorthand for the nth active quest |
-| Superseded facts pruned immediately | LLM can't see "what the player used to believe" | Optionally separate IsSuperseded from pruning; keep superseded for one tick |
-| No quest persistence | World restart clears quest history | Requires serialisation layer (not scoped for v0.1) |
+| `GoalModels.cs` not yet created | NPC goal pursuit not functional | Implement as part of Group 5B |
+| `ShipRoute` union type not yet implemented | Routing still uses `PortId? RoutingDestination` + `OceanPoiId?` | Implement as part of Group 5B |
+| `NpcPursuitAbandoned` event not defined | Stall & Leak mechanic not functional | Add to WorldEvent hierarchy |
+| `NpcClaimedContract` event not defined | Player not notified of NPC competition | Add to WorldEvent hierarchy |
+| `ClaimedByNpc` not in `ContractQuestStatus` enum | Player quest can't reflect NPC completion | Add enum variant |
+| LLM goal selection prompt not implemented | NPCs use rule-based scoring only | Deferred — implement after rule-based path proven |
+| No quest persistence | World restart clears quest history | Requires serialisation layer (not scoped) |
 
 ---
 
 ## 9. Design Reference
 
-The 12 LLM-generated quest examples that drove these design decisions are preserved in `docs/QuestExamples-LLMGenerated.md`. The coverage matrix at the end of that document maps each quest to the claim types, disinformation patterns, and expiry mechanics it exercises.
+The 12 LLM-generated quest examples that informed early design are preserved in `docs/QuestExamples-LLMGenerated.md`. While the template system they were designed for has been removed, the quest *themes* (disinformation, competing intelligence, faction manipulation) remain valid design targets for the EpistemicResolver approach.
 
 ---
 
 ## 10. Open Questions
 
 - Should the player have a persistent quest log showing expired and completed quests with their outcomes?
-- Can factions *react* to the player's quest choices — e.g., a faction learns the player sold their governor's letters and retaliates?
-- Should quest templates have prerequisite checks beyond knowledge (e.g., player notoriety ≥ threshold, or faction standing)?
-- At what point does the phase graph model become necessary? (Likely when quests require multi-day investigation before a choice is presented.)
-- Should disinformation quests visually signal their uncertainty, or should the player always be surprised? (Affects UI design significantly.)
+- Can factions react to NPC goal pursuit outcomes — e.g., a faction learns its bounty was claimed and adjusts strategy?
+- Should NPC goal selection consider faction-level strategic context (e.g., faction under threat → defensive goals preferred)?
+- Should disinformation quests visually signal their uncertainty, or should the player always be surprised?
+- What additional NpcGoal subtypes are needed beyond `FulfillContractGoal`? (TradeGoal, InvestigateGoal, FleeGoal are candidates.)

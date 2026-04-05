@@ -153,7 +153,7 @@ If no actionable contract: assign a default goal appropriate to role
 
 **Part 2 — LLM strategic goal selection (optional, async):**
 
-When QuestSystem (tick 7) detects a Pondering NPC, it dispatches an async
+When QuestSystem (system 8) detects a Pondering NPC, it dispatches an async
 request to the LLM service via the existing `DecisionQueue` infrastructure.
 
 **The prompt payload** — the engine synthesises the NPC's epistemic reality
@@ -215,7 +215,7 @@ public Dictionary<IndividualId, GoalPursuit> NpcPursuits { get; } = new();
 ```
 
 Lives on WorldState so ShipMovementSystem (system 2) can read pursuits when
-setting NPC routes, even though QuestSystem (system 7) creates them.
+setting NPC routes, even though QuestSystem (system 8) creates them.
 
 #### 5B-3: ShipRoute Union Type
 
