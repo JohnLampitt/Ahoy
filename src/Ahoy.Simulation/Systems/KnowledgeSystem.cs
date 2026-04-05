@@ -304,6 +304,27 @@ public sealed class KnowledgeSystem : IWorldSystem
                 break;
             }
 
+            // 5E-1: RouteHazardClaim seeding — storm damage seeds hazard into affected ships
+            case StormPropagated sp:
+                SeedRouteHazardForRegion(sp.ToRegion, "Active storm — dangerous seas", state, sp.Date, baseConfidence, tick);
+                break;
+
+            // 5E-1: PatrolEngaged seeds pirate encounter hazard into surviving ship
+            case PatrolEngaged pe:
+                var peRegion = pe.RegionId;
+                SeedRouteHazardForShip(pe.TargetShip, peRegion, "Naval patrol — hostile waters", state, pe.Date, baseConfidence, tick);
+                SeedRouteHazardForShip(pe.PatrolShip, peRegion, "Pirate encounter", state, pe.Date, baseConfidence, tick);
+                break;
+
+            // 5E-1: ShipRaided seeds pirate hazard into victim's ship
+            case ShipRaided sr:
+            {
+                var raidRegion = state.GetShipRegion(sr.TargetShipId);
+                if (raidRegion.HasValue)
+                    SeedRouteHazardForShip(sr.TargetShipId, raidRegion.Value, "Pirate raid — dangerous route", state, sr.Date, baseConfidence, tick);
+                break;
+            }
+
             case ShipDestroyed sd:
                 // Ship destroyed in combat: knowledge goes into the attacker's ShipHolder.
                 // It propagates to ports only when the attacker docks — realistic lag.
@@ -327,6 +348,40 @@ public sealed class KnowledgeSystem : IWorldSystem
                     AddAndSupersede(state.Knowledge, new PlayerHolder(), sinkFact, tick);
                 break;
         }
+    }
+
+    // ---- 5E-1: RouteHazardClaim seeding helpers ----
+
+    private static void SeedRouteHazardForRegion(
+        RegionId regionId, string description, WorldState state, WorldDate date, float confidence, int tick)
+    {
+        // Seed into all ships currently in the affected region
+        foreach (var ship in state.Ships.Values)
+        {
+            var shipRegion = state.GetShipRegion(ship.Id);
+            if (shipRegion != regionId) continue;
+            SeedRouteHazardForShip(ship.Id, regionId, description, state, date, confidence, tick);
+        }
+    }
+
+    private static void SeedRouteHazardForShip(
+        ShipId shipId, RegionId regionId, string description, WorldState state, WorldDate date, float confidence, int tick)
+    {
+        if (!state.Ships.ContainsKey(shipId)) return;
+
+        // RouteHazardClaim uses From/To — we use regionId for both since the hazard
+        // is at a point, not a specific route. On dock, this propagates to port naturally.
+        var hazardFact = new KnowledgeFact
+        {
+            Claim = new RouteHazardClaim(regionId, regionId, description),
+            Sensitivity = KnowledgeSensitivity.Public,
+            Confidence = confidence,
+            BaseConfidence = confidence,
+            ObservedDate = date,
+            HopCount = 0,
+            SourceHolder = null,
+        };
+        AddAndSupersede(state.Knowledge, new ShipHolder(shipId), hazardFact, tick);
     }
 
     private static void AddAndSupersede(KnowledgeStore store, KnowledgeHolderId holder, KnowledgeFact fact, int tick)
