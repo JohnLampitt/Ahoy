@@ -238,6 +238,19 @@ public record PortStarvation(
     WorldDate Date, SimulationLod SourceLod,
     PortId PortId, int PopulationLoss, float StarvationRatio) : WorldEvent(Date, SourceLod);
 
+// ---- Colonial triage events (Group 9) ----
+
+/// <summary>Faction refused to fund relief for a starving port.</summary>
+public record FactionReliefDenied(
+    WorldDate Date, SimulationLod SourceLod,
+    PortId PortId, FactionId FactionId, Guid CrisisId) : WorldEvent(Date, SourceLod);
+
+/// <summary>A port's governor has renounced their faction allegiance.</summary>
+public record PortDefected(
+    WorldDate Date, SimulationLod SourceLod,
+    PortId PortId, FactionId OldFaction, FactionId? NewFaction,
+    IndividualId GovernorId) : WorldEvent(Date, SourceLod);
+
 // ---- Knowledge conflict events (5C) ----
 
 /// <summary>Emitted when a knowledge conflict auto-resolves (spread > 0.40) or is resolved by investigation.</summary>

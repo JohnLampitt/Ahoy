@@ -67,6 +67,7 @@ public sealed class FactionSystem : IWorldSystem
                 SeedContracts(faction, factionId, state, context);
 
             AssignMissions(faction, factionId, state, context);
+            EvaluateReliefRequests(faction, factionId, state, context, events);
         }
 
         TickBlockadeDetection(state);
@@ -756,6 +757,21 @@ public sealed class FactionSystem : IWorldSystem
                             faction.ActiveGoals.Add(new EspionageGoal { Utility = 0.80f });
                     }
                     break;
+
+                case "PortDefected":
+                    // Rule-based default: recapture if able, ignore if at war/broke
+                    if (s.Description is { } portIdStr
+                        && Guid.TryParse(portIdStr, out var defectedPortGuid))
+                    {
+                        var defectedPort = new PortId(defectedPortGuid);
+                        if (faction.AtWarWith.Count == 0 && faction.TreasuryGold > 2000
+                            && !faction.ActiveGoals.Any(g => g is RecapturePort rp && rp.TargetPort == defectedPort))
+                        {
+                            faction.ActiveGoals.Add(new RecapturePort(defectedPort) { Utility = 0.90f });
+                        }
+                        // Otherwise: write off the port (faction has bigger problems)
+                    }
+                    break;
             }
         }
     }
@@ -880,6 +896,126 @@ public sealed class FactionSystem : IWorldSystem
                 SourceHolder = new FactionHolder(factionId),
             };
             state.Knowledge.AddFact(new FactionHolder(factionId), allegianceFact);
+        }
+    }
+
+    // ---- Group 9 Phase 3: SVS Triage & Relief Request Evaluation ----
+
+    /// <summary>
+    /// Calculate Strategic Value Score for a port. Dual SVS:
+    /// Economic = (pop/1000) × M_relationship × M_threat
+    /// Military = (pop/1000) × M_relationship (ignores threat)
+    /// </summary>
+    private static (float Economic, float Military) CalculateSVS(
+        Port port, FactionId factionId, WorldState state)
+    {
+        var popScore = port.Population / 1000f;
+
+        // Relationship multiplier: viceroy ↔ governor
+        float relMult = 1.0f;
+        var viceroy = state.Ports.Values
+            .Where(p => p.ControllingFactionId == factionId && p.GovernorId.HasValue)
+            .OrderByDescending(p => p.Population)
+            .Select(p => p.GovernorId!.Value)
+            .FirstOrDefault();
+        if (viceroy != default && port.GovernorId.HasValue)
+        {
+            var rel = state.GetRelationship(viceroy, port.GovernorId.Value);
+            relMult = Math.Clamp(1.0f + rel / 100f, 0.5f, 1.5f);
+        }
+
+        // Threat multiplier (economic only)
+        float threatMult = 1.0f;
+        if (port.Conditions.HasFlag(PortConditionFlags.Blockaded)) threatMult = 0.2f;
+        else if (state.Factions.TryGetValue(factionId, out var f) && f.AtWarWith.Count > 0)
+            threatMult = 0.5f;
+
+        // Production multiplier
+        float prodMult = 1.0f;
+        if (port.Economy.BaseProduction.ContainsKey(TradeGood.Gold) ||
+            port.Economy.BaseProduction.ContainsKey(TradeGood.Silver))
+            prodMult = 1.5f;
+
+        var economic = popScore * relMult * threatMult * prodMult;
+        var military = popScore * relMult * prodMult; // ignores threat
+        return (economic, military);
+    }
+
+    /// <summary>
+    /// Evaluate ReliefRequestClaim facts in the viceroy's knowledge.
+    /// Apply SVS triage: approve within budget cap, or deny.
+    /// </summary>
+    private void EvaluateReliefRequests(Faction faction, FactionId factionId,
+        WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        // Find viceroy
+        var viceroyPort = state.Ports.Values
+            .Where(p => p.ControllingFactionId == factionId && p.GovernorId.HasValue)
+            .OrderByDescending(p => p.Population)
+            .FirstOrDefault();
+        if (viceroyPort?.GovernorId is not { } viceroyId) return;
+
+        var viceroyHolder = new IndividualHolder(viceroyId);
+        var requests = state.Knowledge.GetFacts(viceroyHolder)
+            .Where(f => !f.IsSuperseded && f.Claim is ReliefRequestClaim)
+            .ToList();
+
+        // Track active CrisisIds to prevent double-spend
+        var activeCrises = new HashSet<Guid>();
+
+        foreach (var reqFact in requests)
+        {
+            var request = (ReliefRequestClaim)reqFact.Claim;
+            if (activeCrises.Contains(request.CrisisId)) continue;
+            activeCrises.Add(request.CrisisId);
+
+            if (!state.Ports.TryGetValue(request.Port, out var port)) continue;
+
+            // Calculate SVS
+            var (economicSvs, _) = CalculateSVS(port, factionId, state);
+
+            // Budget cap
+            float maxTreasuryPercent = Math.Clamp(economicSvs * 0.02f, 0.01f, 0.25f);
+            int maxApproved = (int)(faction.TreasuryGold * maxTreasuryPercent);
+
+            if (request.EstimatedCost <= maxApproved && maxApproved >= 100)
+            {
+                // APPROVED — dispatch relief mission (handled by AssignMissions)
+                // Supersede the request fact
+                state.Knowledge.MarkSuperseded(viceroyHolder, reqFact, context.TickNumber);
+            }
+            else
+            {
+                // DENIED — dispatch denial courier back
+                state.Knowledge.MarkSuperseded(viceroyHolder, reqFact, context.TickNumber);
+
+                var denialFact = new KnowledgeFact
+                {
+                    Claim = new ReliefDenialClaim(request.Port, request.CrisisId, factionId),
+                    Sensitivity = KnowledgeSensitivity.Restricted,
+                    Confidence = 0.95f,
+                    BaseConfidence = 0.95f,
+                    ObservedDate = state.Date,
+                    SourceHolder = new FactionHolder(factionId),
+                };
+                state.Knowledge.AddFact(viceroyHolder, denialFact);
+
+                // Dispatch denial courier
+                var courierShip = state.Ships.Values
+                    .FirstOrDefault(s => s.OwnerFactionId == factionId
+                        && s.Mission is null && !s.IsPlayerShip
+                        && s.Location is AtPort ap && ap.Port == viceroyPort.Id);
+
+                if (courierShip is not null)
+                {
+                    var mission = new CourierMission(request.Port, denialFact.Id);
+                    courierShip.Mission = mission;
+                    courierShip.Route = new PortRoute(request.Port);
+                }
+
+                var lod = context.GetLod(port.RegionId);
+                events.Emit(new FactionReliefDenied(state.Date, lod, request.Port, factionId, request.CrisisId), lod);
+            }
         }
     }
 

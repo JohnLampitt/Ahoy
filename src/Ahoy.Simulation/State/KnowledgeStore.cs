@@ -108,6 +108,25 @@ public record PortConditionClaim(
     PortId Port,
     PortConditionFlags Condition) : KnowledgeClaim;
 
+/// <summary>
+/// A formal request for faction relief, dispatched by courier from a starving port.
+/// CrisisId prevents duplicate funding of the same famine.
+/// </summary>
+public record ReliefRequestClaim(
+    PortId Port,
+    Guid CrisisId,
+    int FoodDeficit,
+    int EstimatedCost) : KnowledgeClaim;
+
+/// <summary>
+/// Official faction denial of relief, dispatched back by courier.
+/// Triggers defection cascade when governor receives it.
+/// </summary>
+public record ReliefDenialClaim(
+    PortId Port,
+    Guid CrisisId,
+    FactionId DenyingFaction) : KnowledgeClaim;
+
 public record IndividualActionClaim(
     IndividualId ActorId,
     IndividualId TargetId,
@@ -223,6 +242,8 @@ public sealed class KnowledgeFact
         IndividualAllegianceClaim c     => $"Allegiance:{c.Individual.Value}",
         PardonClaim c                  => $"Pardon:{c.Faction.Value}:{c.PardonedActor.Value}",
         PortConditionClaim c           => $"PortCondition:{c.Port.Value}:{c.Condition}",
+        ReliefRequestClaim c           => $"ReliefRequest:{c.CrisisId}",
+        ReliefDenialClaim c            => $"ReliefDenial:{c.CrisisId}",
         IndividualActionClaim c        => $"Action:{c.ActorId.Value}:{c.TargetId.Value}:{c.Context.GetHashCode():X8}",
         _                               => claim.GetType().Name,
     };

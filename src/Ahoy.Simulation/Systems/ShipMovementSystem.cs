@@ -1,5 +1,6 @@
 using Ahoy.Core.Enums;
 using Ahoy.Core.Ids;
+using Ahoy.Core.ValueObjects;
 using Ahoy.Simulation.Engine;
 using Ahoy.Simulation.Events;
 using Ahoy.Simulation.State;
@@ -611,6 +612,52 @@ public sealed class ShipMovementSystem : IWorldSystem
         return _windModifiers.TryGetValue(degrees, out var mod) ? mod : 1.0f;
     }
 
+    // ---- Group 9 Phase 6: Dynamic Promotion ----
+
+    /// <summary>
+    /// Promote a headless ship to a named captain when it performs a remarkable action.
+    /// Creates a new Individual with pre-seeded relationships based on the triggering event.
+    /// </summary>
+    private static void PromoteHeadlessShip(Ship ship, PortId portId, WorldState state, string deed)
+    {
+        if (ship.CaptainId.HasValue) return; // already captained
+
+        var rng = new Random(ship.Id.Value.GetHashCode()); // deterministic from ship ID
+        var newCaptain = new Individual
+        {
+            Id = IndividualId.New(),
+            FirstName = NamePool.RandomFirst(rng),
+            LastName = NamePool.RandomLast(rng),
+            Role = IndividualRole.NavalOfficer,
+            FactionId = ship.OwnerFactionId,
+            LocationPortId = portId,
+            Personality = PersonalityTraits.Random(rng),
+            CurrentGold = 50,
+        };
+
+        state.Individuals[newCaptain.Id] = newCaptain;
+        ship.CaptainId = newCaptain.Id;
+
+        // Relational injection: seed a deed claim so the new captain has a relationship
+        if (state.Ports.TryGetValue(portId, out var port) && port.GovernorId.HasValue)
+        {
+            // Famine relief → Blood Brother with local governor
+            state.AdjustRelationship(newCaptain.Id, port.GovernorId.Value, 80f);
+            state.AdjustRelationship(port.GovernorId.Value, newCaptain.Id, 80f);
+        }
+
+        // Seed the deed into their knowledge
+        state.Knowledge.AddFact(new IndividualHolder(newCaptain.Id), new KnowledgeFact
+        {
+            Claim = new IndividualActionClaim(newCaptain.Id, newCaptain.Id, null,
+                ActionPolarity.Friendly, ActionSeverity.Heroic, deed),
+            Sensitivity = KnowledgeSensitivity.Public,
+            Confidence = 0.95f,
+            BaseConfidence = 0.95f,
+            ObservedDate = state.Date,
+        });
+    }
+
     /// <summary>Resolve a headless ship's mission on arrival. Captained ships use QuestSystem instead.</summary>
     private static void ResolveHeadlessMission(Ship ship, PortId portId, WorldState state)
     {
@@ -625,6 +672,13 @@ public sealed class ShipMovementSystem : IWorldSystem
                     port.Economy.Supply[relief.Cargo] =
                         port.Economy.Supply.GetValueOrDefault(relief.Cargo) + carried;
                     ship.Cargo.Remove(relief.Cargo);
+
+                    // Dynamic Promotion: headless ship broke a famine → generate named captain
+                    if (relief.Cargo == TradeGood.Food
+                        && port.Conditions.HasFlag(PortConditionFlags.Famine))
+                    {
+                        PromoteHeadlessShip(ship, portId, state, "Broke the famine");
+                    }
                 }
                 break;
 

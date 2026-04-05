@@ -68,6 +68,9 @@ public sealed class Port
     /// <summary>Ticks remaining until epidemic clears naturally. Null = no active epidemic timer.</summary>
     public int? EpidemicTicksRemaining { get; private set; }
 
+    /// <summary>Active crisis ID for famine relief. Prevents duplicate plea couriers.</summary>
+    public Guid? ActiveCrisisId { get; set; }
+
     // ---- Condition mutation methods (enforce correlated invariants) ----
 
     /// <summary>Start an epidemic at this port. Sets Plague flag and decay timer together.</summary>

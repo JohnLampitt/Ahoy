@@ -106,6 +106,9 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
         // --- 6D: Personal goal generation pass ---
         EvaluatePersonalGoals(state, context);
 
+        // --- Group 9 Phase 4: Defection evaluation ---
+        EvaluateDefections(state, context, events);
+
         // --- Group 7: Crisis-driven contract seeding ---
         SeedCrisisContracts(state);
     }
@@ -121,9 +124,12 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
             if (individual.LocationPortId is not { } portId) continue;
             if (!state.Ports.TryGetValue(portId, out var port)) continue;
 
-            // Group 8: Famine — seed faction-backed food relief contracts
+            // Group 9: Famine — dispatch courier plea to capital + seed local relief
             if (port.Conditions.HasFlag(PortConditionFlags.Famine))
+            {
+                DispatchFaminePlea(individual, port, state);
                 SeedFamineRelief(individual, port, state);
+            }
 
             // Crisis 2: Epidemic — seed Medicine and Food delivery contracts
             if (port.Conditions.HasFlag(PortConditionFlags.Plague))
@@ -139,6 +145,173 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
                 && faction.AtWarWith.Count > 0)
                 SeedLettersOfMarque(individual, faction, state);
         }
+    }
+
+    // ---- Group 9 Phase 4: Defection Cascade ----
+
+    private void EvaluateDefections(WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        foreach (var individual in state.Individuals.Values)
+        {
+            if (!individual.IsAlive) continue;
+            if (individual.Role != IndividualRole.Governor) continue;
+            if (individual.FactionId is not { } factionId) continue;
+            if (individual.LocationPortId is not { } portId) continue;
+            if (!state.Ports.TryGetValue(portId, out var port)) continue;
+            if (port.ControllingFactionId != factionId) continue; // already defected
+
+            // Check if governor received a relief denial
+            var governorHolder = new IndividualHolder(individual.Id);
+            var denial = state.Knowledge.GetFacts(governorHolder)
+                .FirstOrDefault(f => !f.IsSuperseded && f.Claim is ReliefDenialClaim rdc
+                    && rdc.Port == portId);
+            if (denial is null) continue;
+
+            // Find viceroy to check relationship
+            var viceroy = state.Ports.Values
+                .Where(p => p.ControllingFactionId == factionId && p.GovernorId.HasValue)
+                .OrderByDescending(p => p.Population)
+                .Select(p => p.GovernorId!.Value)
+                .FirstOrDefault();
+            if (viceroy == default) continue;
+
+            // Deed: Crown abandoned us
+            var deedFact = new KnowledgeFact
+            {
+                Claim = new IndividualActionClaim(viceroy, individual.Id, null,
+                    ActionPolarity.Hostile, ActionSeverity.Severe, "Abandoned colony to starvation"),
+                Sensitivity = KnowledgeSensitivity.Public,
+                Confidence = 0.95f,
+                BaseConfidence = 0.95f,
+                ObservedDate = state.Date,
+            };
+            state.Knowledge.AddFact(governorHolder, deedFact);
+
+            // Check if relationship has reached nemesis
+            var relWithViceroy = state.GetRelationship(individual.Id, viceroy);
+            if (relWithViceroy > -75f) continue; // not angry enough yet
+            if (!port.Conditions.HasFlag(PortConditionFlags.Famine)) continue; // not starving
+
+            // DEFECT — flip port to Independent
+            var oldFaction = port.ControllingFactionId;
+            port.ControllingFactionId = null;
+            individual.FactionId = null;
+            port.ActiveCrisisId = null; // crisis is "resolved" by defection
+
+            // Remove from faction's controlled ports
+            if (oldFaction.HasValue && state.Factions.TryGetValue(oldFaction.Value, out var f))
+                f.ControlledPorts.Remove(portId);
+
+            var lod = context.GetLod(port.RegionId);
+            events.Emit(new PortDefected(state.Date, lod, portId, oldFaction!.Value, null, individual.Id), lod);
+
+            // Broadcast: governor buys food from anyone
+            var broadcastContract = new ContractClaim(
+                individual.Id, default, $"Port:{portId.Value}:Food",
+                ContractConditionType.GoodsDelivered,
+                Math.Max(100, individual.CurrentGold / 2),
+                NarrativeArchetype.DesperatePlea);
+            state.Knowledge.AddFact(new PortHolder(portId), new KnowledgeFact
+            {
+                Claim = broadcastContract,
+                Sensitivity = KnowledgeSensitivity.Public,
+                Confidence = 0.90f,
+                BaseConfidence = 0.90f,
+                ObservedDate = state.Date,
+            });
+
+            // Pirate assassination opportunity: if pirates have regional presence,
+            // they seed a bounty on the independent governor
+            foreach (var pirateFaction in state.Factions.Values.Where(pf => pf.Type == FactionType.PirateBrotherhood))
+            {
+                if (!pirateFaction.HavenPresence.TryGetValue(port.RegionId, out var presence) || presence < 10f)
+                    continue;
+
+                var hitContract = new ContractClaim(
+                    default, pirateFaction.Id, $"Individual:{individual.Id.Value}",
+                    ContractConditionType.TargetDead, 200,
+                    NarrativeArchetype.UnderworldHit);
+                // Seed into pirate havens in the region
+                foreach (var haven in state.Ports.Values.Where(p => p.IsPirateHaven && p.RegionId == port.RegionId))
+                {
+                    state.Knowledge.AddFact(new PortHolder(haven.Id), new KnowledgeFact
+                    {
+                        Claim = hitContract,
+                        Sensitivity = KnowledgeSensitivity.Restricted,
+                        Confidence = 0.85f,
+                        BaseConfidence = 0.85f,
+                        ObservedDate = state.Date,
+                    });
+                }
+                break; // one pirate faction's hit per defection
+            }
+
+            // Supersede the denial fact — it's been acted upon
+            state.Knowledge.MarkSuperseded(governorHolder, denial, context.TickNumber);
+        }
+    }
+
+    /// <summary>
+    /// Group 9 Phase 3: Dispatch a courier ship to the faction capital carrying
+    /// a formal relief request. Uses CrisisId to prevent duplicate pleas.
+    /// </summary>
+    private void DispatchFaminePlea(Individual governor, Port port, WorldState state)
+    {
+        if (governor.FactionId is not { } factionId) return;
+        if (port.ActiveCrisisId.HasValue) return; // already sent a plea for this crisis
+
+        // Find the capital (highest-pop port of our faction)
+        var capital = state.Ports.Values
+            .Where(p => p.ControllingFactionId == factionId)
+            .OrderByDescending(p => p.Population)
+            .FirstOrDefault();
+        if (capital is null || capital.Id == port.Id) return; // we ARE the capital
+
+        // Generate CrisisId
+        var crisisId = Guid.NewGuid();
+        port.ActiveCrisisId = crisisId;
+
+        // Create the relief request fact
+        var foodTarget = port.Economy.TargetSupply.GetValueOrDefault(TradeGood.Food, 1);
+        var foodSupply = port.Economy.Supply.GetValueOrDefault(TradeGood.Food, 0);
+        var deficit = foodTarget - foodSupply;
+        var cost = deficit * port.Economy.EffectivePrice(TradeGood.Food);
+
+        var requestFact = new KnowledgeFact
+        {
+            Claim = new ReliefRequestClaim(port.Id, crisisId, deficit, cost),
+            Sensitivity = KnowledgeSensitivity.Restricted,
+            Confidence = 0.95f,
+            BaseConfidence = 0.95f,
+            ObservedDate = state.Date,
+            SourceHolder = new IndividualHolder(governor.Id),
+        };
+        state.Knowledge.AddFact(new IndividualHolder(governor.Id), requestFact);
+
+        // Find an idle faction ship to carry the plea
+        var courierShip = state.Ships.Values
+            .FirstOrDefault(s => s.OwnerFactionId == factionId
+                && s.Mission is null
+                && !s.IsPlayerShip
+                && s.Location is AtPort ap && ap.Port == port.Id);
+
+        if (courierShip is not null)
+        {
+            var mission = new CourierMission(capital.Id, requestFact.Id);
+            courierShip.Mission = mission;
+            courierShip.Route = new PortRoute(capital.Id);
+
+            if (courierShip.CaptainId.HasValue)
+            {
+                state.NpcPursuits[courierShip.CaptainId.Value] = new GoalPursuit
+                {
+                    ActiveGoal = new ExecuteOrdersGoal(Guid.NewGuid(), courierShip.CaptainId.Value, mission),
+                    State = PursuitState.Active,
+                    ActivatedOnTick = 0, // will be overwritten next tick
+                };
+            }
+        }
+        // If no ship available, the plea travels only via gossip (slower, less reliable)
     }
 
     /// <summary>

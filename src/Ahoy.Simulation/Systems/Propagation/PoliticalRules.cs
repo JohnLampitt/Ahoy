@@ -47,6 +47,32 @@ public sealed class PortCaptureRelationshipRule : PropagationRule
 }
 
 /// <summary>
+/// Group 9 — Port defected → queue stimulus to the original faction for response.
+/// </summary>
+public sealed class PortDefectionRule : PropagationRule
+{
+    public override string RuleId => "B1b_PortDefection";
+
+    public override bool Matches(WorldEvent e) => e is PortDefected;
+
+    public override void Apply(WorldEvent worldEvent, WorldState state,
+        SimulationContext context, IEventEmitter events)
+    {
+        var ev = (PortDefected)worldEvent;
+        if (!state.Factions.TryGetValue(ev.OldFaction, out _)) return;
+
+        state.PendingFactionStimuli.Enqueue(new FactionStimulus
+        {
+            FactionId = ev.OldFaction,
+            StimulusType = "PortDefected",
+            Magnitude = 1f,
+            Description = ev.PortId.Value.ToString(),
+            PortId = ev.PortId,
+        });
+    }
+}
+
+/// <summary>
 /// B2 — Governor authority drop → faction authority penalty.
 /// Low-authority ports are harder to defend and generate less income.
 /// </summary>

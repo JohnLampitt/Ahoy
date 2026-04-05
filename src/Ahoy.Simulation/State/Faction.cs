@@ -105,3 +105,4 @@ public record EstablishHaven(PortId TargetPort) : FactionGoal;          // Pirat
 public record EspionageGoal : FactionGoal;              // drives intelligence operations
 public record DeclareWar(FactionId TargetFaction) : FactionGoal;    // Crisis 6: triggers AtWarWith
 public record SeekPeace(FactionId TargetFaction) : FactionGoal;     // Crisis 6: ends war via treaty
+public record RecapturePort(PortId TargetPort) : FactionGoal;       // Group 9: retake defected port

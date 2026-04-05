@@ -199,6 +199,7 @@ public sealed class EventPropagationSystem : IWorldSystem
         new RaidingProsperityRule(),
         // Political
         new PortCaptureRelationshipRule(),
+        new PortDefectionRule(),
         new GovernorAuthorityRule(),
         // Military
         new PatrolSuppressRaidingRule(),
