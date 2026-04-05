@@ -230,3 +230,15 @@ public record QuestResolved(
 public record ContractFulfilled(
     WorldDate Date, SimulationLod SourceLod,
     IndividualId IssuerId, string TargetSubjectKey, int GoldPaid) : WorldEvent(Date, SourceLod);
+
+// ---- NPC goal pursuit events (5B) ----
+
+/// <summary>Emitted when an NPC abandons a goal after stalling too long. Triggers Stall & Leak.</summary>
+public record NpcPursuitAbandoned(
+    WorldDate Date, SimulationLod SourceLod,
+    IndividualId NpcId, string GoalDescription) : WorldEvent(Date, SourceLod);
+
+/// <summary>Emitted when an NPC fulfils a contract before the player. Player's quest expires as ClaimedByNpc.</summary>
+public record NpcClaimedContract(
+    WorldDate Date, SimulationLod SourceLod,
+    IndividualId NpcId, string TargetSubjectKey, int GoldPaid) : WorldEvent(Date, SourceLod);

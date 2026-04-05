@@ -138,23 +138,20 @@ public sealed class SimulationEngine
                 if (_state.Ships.TryGetValue(sc.ShipId, out var ship) &&
                     _state.Ports.TryGetValue(sc.DestinationPort, out var destPort))
                 {
-                    ship.RoutingDestination = sc.DestinationPort;
-                    // If at port, departure will be handled by ShipMovementSystem
-                    // If at sea, movement system will plot course
+                    ship.Route = new State.PortRoute(sc.DestinationPort);
                 }
                 break;
 
             case AnchorCommand ac:
                 if (_state.Ships.TryGetValue(ac.ShipId, out var anchorShip))
-                    anchorShip.RoutingDestination = null;
+                    anchorShip.Route = null;
                 break;
 
             case SetCourseToPoi scp:
                 if (_state.Ships.TryGetValue(scp.ShipId, out var poiShip)
                     && _state.OceanPois.ContainsKey(scp.PoiId))
                 {
-                    poiShip.PoiDestination = scp.PoiId;
-                    poiShip.RoutingDestination = null;   // clear any port destination
+                    poiShip.Route = new State.PoiRoute(scp.PoiId);
                 }
                 break;
 
@@ -171,7 +168,7 @@ public sealed class SimulationEngine
                     if (fleetShip.Location is not State.AtPort fleetAtPort) continue;
 
                     fleetShip.ConvoyId = convoyId;
-                    fleetShip.RoutingDestination = sfc.DestinationPort;
+                    fleetShip.Route = new State.PortRoute(sfc.DestinationPort);
                     dockedShips.Add(shipId);
                     firstPort ??= fleetAtPort.Port;
                 }
