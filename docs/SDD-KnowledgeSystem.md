@@ -84,60 +84,69 @@ public sealed class KnowledgeFact
 
 ### 2.2 KnowledgeClaim
 
-The actual content of a fact. A discriminated union typed by category.
+The actual content of a fact. A discriminated union typed by category. All
+claim types are `record` subtypes of `KnowledgeClaim` in `KnowledgeStore.cs`.
 
 ```csharp
-// Ahoy.Simulation/Knowledge/KnowledgeClaim.cs
-
 public abstract record KnowledgeClaim;
 
-// Economic
-public record PortPricesClaim(PortId Port, Dictionary<TradeGood, int> Prices)
-    : KnowledgeClaim;
-public record TradeRouteSafetyChangedClaim(RegionId Region, float SafetyScore)
-    : KnowledgeClaim;
+// ---- Economic ----
+public record PortPriceClaim(PortId Port, TradeGood Good, int Price) : KnowledgeClaim;
+public record PortProsperityClaim(PortId Port, float Prosperity) : KnowledgeClaim;
+public record PortControlClaim(PortId Port, FactionId? FactionId) : KnowledgeClaim;
+public record PortConditionClaim(PortId Port, PortConditionFlags Condition) : KnowledgeClaim;
 
-// Naval / Military
-public record ShipSpottedClaim(ShipId Ship, RegionId Region, FactionId? Owner)
-    : KnowledgeClaim;
-public record FleetMovementClaim(FactionId Faction, RegionId Destination, int EstimatedSize)
-    : KnowledgeClaim;
-public record PatrolRouteClaim(FactionId Faction, List<RegionId> Regions)
-    : KnowledgeClaim;
+// ---- Naval / Ship ----
+public record ShipLocationClaim(ShipId Ship, ShipLocation LastKnownLocation) : KnowledgeClaim;
+public record ShipStatusClaim(ShipId Ship, bool IsDestroyed, RegionId? LastKnownRegion) : KnowledgeClaim;
+public record ShipCargoClaim(ShipId Ship, Dictionary<TradeGood, int> Cargo) : KnowledgeClaim;
 
-// Political
-public record FactionRelationshipClaim(FactionId A, FactionId B, int Standing)
-    : KnowledgeClaim;
-public record GovernorTraitClaim(IndividualId Governor, string Trait, object Value)
-    : KnowledgeClaim;   // e.g. Trait="AcceptsBribes", Value=true
+// ---- Faction / Political ----
+public record FactionStrengthClaim(FactionId Faction, int NavalStrength, int TreasuryGold) : KnowledgeClaim;
+public record FactionIntentionClaim(FactionId Faction, string IntentionSummary) : KnowledgeClaim;
 
-// Personal
-public record IndividualLocationClaim(IndividualId Individual, PortId Port)
-    : KnowledgeClaim;
-public record IndividualReputationClaim(IndividualId Individual, int Reputation)
-    : KnowledgeClaim;
+// ---- Environment ----
+public record WeatherClaim(RegionId Region, WindStrength Wind, StormPresence Storm) : KnowledgeClaim;
+public record RouteHazardClaim(RegionId From, RegionId To, string Description) : KnowledgeClaim;
 
-// Geographic / Secret
-public record TreasureRouteClaim(List<RegionId> Route, int EstimatedValue)
-    : KnowledgeClaim;
-public record HiddenLocationClaim(string Description, RegionId Region)
-    : KnowledgeClaim;
+// ---- Individual ----
+public record IndividualWhereaboutsClaim(IndividualId Individual, PortId? Port) : KnowledgeClaim;
+public record IndividualStatusClaim(IndividualId Individual, IndividualRole Role, FactionId? FactionId, bool IsAlive) : KnowledgeClaim;
+public record IndividualAllegianceClaim(IndividualId Individual, FactionId ClaimedFaction, FactionId? ActualFaction) : KnowledgeClaim;
+
+// ---- Deed Ledger (Group 6A) ----
+public record IndividualActionClaim(IndividualId ActorId, IndividualId TargetId, IndividualId? BeneficiaryId,
+    ActionPolarity Polarity, ActionSeverity Severity, string Context) : KnowledgeClaim;
+
+// ---- Reconciliation (Group 6E) ----
+public record PardonClaim(IndividualId GrantedBy, FactionId Faction, IndividualId PardonedActor) : KnowledgeClaim;
+
+// ---- Contracts ----
+public record ContractClaim(IndividualId IssuerId, FactionId IssuerFactionId, string TargetSubjectKey,
+    ContractConditionType Condition, int GoldReward, NarrativeArchetype Archetype) : KnowledgeClaim;
+
+// ---- POI / Geographic ----
+public record OceanPoiClaim(OceanPoiId Poi, RegionId Region, PoiType Type,
+    bool IsDiscovered, PoiCacheStatus CacheStatus) : KnowledgeClaim;
+
+// ---- Other ----
+public record PlayerActionClaim(string QuestTemplateId, string BranchId, PortId? Location) : KnowledgeClaim;
+public record CustomClaim(string Subject, string Detail) : KnowledgeClaim;
 ```
 
 ---
 
 ### 2.3 KnowledgeSensitivity
 
-How much the subject of a fact wants it suppressed. Governs spread rate and access restrictions.
+Governs passive propagation rate between holders.
 
 ```csharp
 public enum KnowledgeSensitivity
 {
-    Public,      // Openly known; no restrictions (port ownership, faction allegiance)
-    Common,      // Spreads freely through normal social channels (approximate prices, sea conditions)
-    Restricted,  // Subject prefers privacy; needs a relationship to access
-    Guarded,     // Subject actively works to suppress; requires trust, gold, or coercion
-    Secret       // Faction/individual will act to prevent spread; high risk to trade openly
+    Public,         // 30% propagation per tick — tavern gossip, port news
+    Restricted,     // 10% propagation — factional intelligence, broker inventory
+    Secret,         //  0% propagation — never spreads passively, requires investigation
+    Disinformation  // 30% propagation — planted lies spread freely by design
 }
 ```
 
@@ -145,53 +154,46 @@ public enum KnowledgeSensitivity
 
 ### 2.4 KnowledgeStore
 
-The world-level registry. Owned by `WorldState`.
+The world-level registry. Owned by `WorldState`. Keyed by holder — each
+holder has a list of `KnowledgeFact`s they believe to be true.
 
 ```csharp
-// Ahoy.Simulation/Knowledge/KnowledgeStore.cs
-
 public sealed class KnowledgeStore
 {
-    // All facts that exist in the world
-    public Dictionary<KnowledgeFactId, KnowledgeFact> Facts { get; } = new();
+    public IReadOnlyList<KnowledgeFact> GetFacts(KnowledgeHolderId holder);
+    public bool AddFact(KnowledgeHolderId holder, KnowledgeFact fact);
+    public void MarkSuperseded(KnowledgeHolderId holder, KnowledgeFact fact, int tick);
 
-    // Who holds which facts — the spreading state of each piece of knowledge
-    // KnowledgeHolderId can represent a player, individual, faction, or port
-    public Dictionary<KnowledgeHolderId, HashSet<KnowledgeFactId>> HolderFacts { get; } = new();
+    // Conflict tracking
+    public IEnumerable<KnowledgeConflict> GetConflicts(KnowledgeHolderId holder);
+    public IEnumerable<(KnowledgeHolderId, KnowledgeConflict)> GetAllConflicts();
 
-    // Facts being actively guarded by an entity
-    public Dictionary<KnowledgeFactId, ActiveGuard> GuardedFacts { get; } = new();
+    // Source reliability — per-holder float (default 1.0)
+    public float GetSourceReliability(KnowledgeHolderId? source);
+    public void RecordSourceOutcome(KnowledgeHolderId source, bool wasAccurate);
 
-    // Convenience: facts held by a specific actor
-    public IEnumerable<KnowledgeFact> FactsKnownBy(KnowledgeHolderId holder) =>
-        HolderFacts.TryGetValue(holder, out var ids)
-            ? ids.Select(id => Facts[id])
-            : Enumerable.Empty<KnowledgeFact>();
-}
-
-public sealed class ActiveGuard
-{
-    public KnowledgeFactId  Fact        { get; init; }
-    public KnowledgeHolderId Guardian   { get; init; }   // faction or individual
-    public int              Intensity   { get; init; }   // 1–10; affects spread suppression
+    public void PruneExpired(int currentTick);
 }
 ```
-
-`WorldState` gains: `KnowledgeStore Knowledge { get; } = new();`
 
 ---
 
 ### 2.5 KnowledgeHolderId
 
-A union type identifying who holds knowledge — player, named individual, faction, or port population.
+A union type identifying who holds knowledge.
 
 ```csharp
 public abstract record KnowledgeHolderId;
-public record PlayerHolder                              : KnowledgeHolderId;
-public record IndividualHolder(IndividualId Id)         : KnowledgeHolderId;
-public record FactionHolder(FactionId Id)               : KnowledgeHolderId;
-public record PortHolder(PortId Id)                     : KnowledgeHolderId;
+public record PlayerHolder : KnowledgeHolderId;
+public record IndividualHolder(IndividualId Individual) : KnowledgeHolderId;
+public record FactionHolder(FactionId Faction) : KnowledgeHolderId;
+public record PortHolder(PortId Port) : KnowledgeHolderId;
+public record ShipHolder(ShipId Ship) : KnowledgeHolderId;
 ```
+
+- **ShipHolder** — crew collective knowledge (navigator's log, tavern chatter)
+- **IndividualHolder** — captain's personal knowledge (drives NPC routing and decisions)
+- **PortHolder** — population knowledge pool (collective awareness of residents)
 
 Ports hold a **population knowledge pool** — the collective awareness of residents and frequent visitors. This is distinct from the knowledge of individual named NPCs at that port.
 
