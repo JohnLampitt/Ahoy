@@ -358,16 +358,17 @@ public sealed class ShipMovementSystem : IWorldSystem
         // Always depart if docked too long (prevents permanent stranding)
         if (ship.TicksDockedAtCurrentPort >= 5) return true;
 
-        // Depart if captain has market intelligence for accessible ports
-        if (ship.CaptainId.HasValue)
-        {
-            var captainHolder = new IndividualHolder(ship.CaptainId.Value);
-            var hasActionableKnowledge = state.Knowledge.GetFacts(captainHolder)
-                .Any(f => !f.IsSuperseded
-                    && f.Claim is PortPriceClaim
-                    && f.Confidence > 0.40f);
-            if (hasActionableKnowledge) return true;
-        }
+        // Depart if captain or crew has market intelligence for accessible ports
+        // 5A-1: Check both IndividualHolder (captain) and ShipHolder (crew gossip)
+        bool HasActionablePriceKnowledge(KnowledgeHolderId holder) =>
+            state.Knowledge.GetFacts(holder)
+                .Any(f => !f.IsSuperseded && f.Claim is PortPriceClaim && f.Confidence > 0.40f);
+
+        if (ship.CaptainId.HasValue && HasActionablePriceKnowledge(new IndividualHolder(ship.CaptainId.Value)))
+            return true;
+
+        if (HasActionablePriceKnowledge(new ShipHolder(ship.Id)))
+            return true;
 
         return false;
     }
@@ -401,15 +402,11 @@ public sealed class ShipMovementSystem : IWorldSystem
             }
         }
 
-        // Find the highest-confidence known port that is accessible from current region.
-        // Agent routes toward what they know, not what is objectively best.
+        // 5A-1: Union IndividualHolder + ShipHolder facts, score by expected margin.
+        // Crew gossip (ShipHolder) is the navigator's log — captains consult this.
         var accessiblePortIds = GetAccessiblePortIds(currentRegion, state);
-        var best = state.Knowledge.GetFacts(agentHolder)
-            .Where(f => !f.IsSuperseded && f.Claim is PortPriceClaim pc
-                        && accessiblePortIds.Contains(pc.Port))
-            .OrderByDescending(f => f.Confidence)
-            .Select(f => (PortId?)((PortPriceClaim)f.Claim).Port)
-            .FirstOrDefault();
+        var knownPrices = GetKnownPrices(agentHolder, ship, state, accessiblePortIds);
+        var best = ScoreMerchantDestination(knownPrices, ship, accessiblePortIds);
 
         // Fallback chain: HomePort (if stranded) → random accessible port
         PortId? homePort = null;
@@ -564,5 +561,96 @@ public sealed class ShipMovementSystem : IWorldSystem
     {
         var regionId = state.GetShipRegion(ship.Id);
         return regionId.HasValue ? context.GetLod(regionId.Value) : SimulationLod.Distant;
+    }
+
+    // ---- 5A-1: Knowledge-driven merchant routing ----
+
+    /// <summary>
+    /// Union IndividualHolder + ShipHolder price facts for accessible ports.
+    /// Returns the highest-confidence PortPriceClaim per (Port, Good) pair.
+    /// </summary>
+    private static List<(KnowledgeFact Fact, PortPriceClaim Claim)> GetKnownPrices(
+        KnowledgeHolderId agentHolder, Ship ship, WorldState state, HashSet<PortId> accessiblePortIds)
+    {
+        var holders = new List<KnowledgeHolderId> { agentHolder };
+
+        // Add ShipHolder as secondary source (crew gossip = navigator's log)
+        var shipHolder = new ShipHolder(ship.Id);
+        if (agentHolder is not ShipHolder) // avoid duplicate if agent IS the ship
+            holders.Add(shipHolder);
+
+        // Collect all non-superseded PortPriceClaims from both holders
+        var allPriceFacts = new Dictionary<string, (KnowledgeFact Fact, PortPriceClaim Claim)>();
+
+        foreach (var holder in holders)
+        {
+            foreach (var fact in state.Knowledge.GetFacts(holder))
+            {
+                if (fact.IsSuperseded) continue;
+                if (fact.Claim is not PortPriceClaim pc) continue;
+                if (!accessiblePortIds.Contains(pc.Port)) continue;
+
+                // Key by Port+Good — keep highest confidence
+                var key = $"{pc.Port.Value}:{pc.Good}";
+                if (!allPriceFacts.TryGetValue(key, out var existing) || fact.Confidence > existing.Fact.Confidence)
+                    allPriceFacts[key] = (fact, pc);
+            }
+        }
+
+        return allPriceFacts.Values.ToList();
+    }
+
+    /// <summary>
+    /// Score candidate ports by expected trade margin.
+    /// If ship has cargo: find ports with highest known sell prices for carried goods.
+    /// If ship is empty: find ports with lowest known buy prices (buying opportunity).
+    /// Falls back to highest-confidence known port if no margin data available.
+    /// </summary>
+    private static PortId? ScoreMerchantDestination(
+        List<(KnowledgeFact Fact, PortPriceClaim Claim)> knownPrices,
+        Ship ship,
+        HashSet<PortId> accessiblePortIds)
+    {
+        if (knownPrices.Count == 0) return null;
+
+        var hasCargo = ship.Cargo.Any(kv => kv.Value > 0);
+
+        if (hasCargo)
+        {
+            // Score ports by: sum of (known sell price × confidence) for goods we carry
+            var portScores = new Dictionary<PortId, float>();
+            foreach (var (fact, claim) in knownPrices)
+            {
+                if (!ship.Cargo.ContainsKey(claim.Good) || ship.Cargo[claim.Good] <= 0) continue;
+                var score = claim.Price * fact.Confidence * ship.Cargo[claim.Good];
+                portScores.TryGetValue(claim.Port, out var existing);
+                portScores[claim.Port] = existing + score;
+            }
+
+            if (portScores.Count > 0)
+                return portScores.MaxBy(kv => kv.Value).Key;
+        }
+        else
+        {
+            // No cargo — route toward port with lowest known prices (buying opportunity).
+            // Score = inverse price weighted by confidence (lower price = better opportunity).
+            var portScores = new Dictionary<PortId, float>();
+            foreach (var (fact, claim) in knownPrices)
+            {
+                if (claim.Price <= 0) continue;
+                var score = fact.Confidence / claim.Price;
+                portScores.TryGetValue(claim.Port, out var existing);
+                portScores[claim.Port] = existing + score;
+            }
+
+            if (portScores.Count > 0)
+                return portScores.MaxBy(kv => kv.Value).Key;
+        }
+
+        // Fallback: highest-confidence known port (original behaviour)
+        return knownPrices
+            .OrderByDescending(x => x.Fact.Confidence)
+            .Select(x => (PortId?)x.Claim.Port)
+            .FirstOrDefault();
     }
 }
