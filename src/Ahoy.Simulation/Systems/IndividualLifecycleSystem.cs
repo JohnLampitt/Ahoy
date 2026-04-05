@@ -105,6 +105,128 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
                     SimulationLod.Local);
             }
         }
+
+        // --- 6D: Personal goal generation pass ---
+        EvaluatePersonalGoals(state, context);
+    }
+
+    // ---- 6D: Personal Goal Generation ----
+
+    /// <summary>
+    /// Evaluate NPC relationships and knowledge to generate personal contracts.
+    /// Vengeance: R &lt; -75 → seed bounty ContractClaim from personal wealth.
+    /// Patronage: R &gt; +50 → inject exclusive intel into ally's knowledge.
+    /// Extortion: deferred (requires ExtortGoal in EpistemicResolver).
+    /// </summary>
+    private void EvaluatePersonalGoals(WorldState state, SimulationContext context)
+    {
+        foreach (var individual in state.Individuals.Values)
+        {
+            if (!individual.IsAlive) continue;
+            if (individual.LocationPortId is null) continue; // must be at a port
+
+            // --- Vengeance: seed a contract against nemesis ---
+            if (individual.Role is IndividualRole.Governor
+                or IndividualRole.PirateCaptain
+                or IndividualRole.NavalOfficer
+                or IndividualRole.Privateer)
+            {
+                TryVengeanceTrigger(individual, state, context);
+            }
+
+            // --- Patronage: inject intel to allies ---
+            if (individual.Role is IndividualRole.Governor or IndividualRole.KnowledgeBroker)
+            {
+                TryPatronageTrigger(individual, state);
+            }
+        }
+    }
+
+    private void TryVengeanceTrigger(Individual npc, WorldState state, SimulationContext context)
+    {
+        const int VengeanceCost = 200;
+        const float NemesisThreshold = -75f;
+
+        if (npc.CurrentGold < VengeanceCost) return;
+
+        // Find worst enemy
+        IndividualId? worstEnemy = null;
+        float worstRel = NemesisThreshold;
+
+        foreach (var ((observer, subject), rel) in state.RelationshipMatrix)
+        {
+            if (observer != npc.Id) continue;
+            if (rel >= worstRel) continue;
+            if (!state.Individuals.TryGetValue(subject, out var target) || !target.IsAlive) continue;
+
+            worstEnemy = subject;
+            worstRel = rel;
+        }
+
+        if (worstEnemy is null) return;
+
+        // Cooldown: don't seed duplicate contracts for the same target
+        var targetKey = $"Individual:{worstEnemy.Value.Value}";
+        if (state.Quests.IsOnCooldown(targetKey, state.Date)) return;
+
+        // Deduct gold and seed a ContractClaim into the local port
+        npc.CurrentGold -= VengeanceCost;
+
+        var contract = new ContractClaim(
+            IssuerId: npc.Id,
+            IssuerFactionId: npc.FactionId ?? default,
+            TargetSubjectKey: targetKey,
+            Condition: ContractConditionType.TargetDead,
+            GoldReward: VengeanceCost,
+            Archetype: npc.Role == IndividualRole.PirateCaptain
+                ? NarrativeArchetype.PirateRival
+                : NarrativeArchetype.UnderworldHit);
+
+        var fact = new KnowledgeFact
+        {
+            Claim = contract,
+            Sensitivity = KnowledgeSensitivity.Restricted, // personal bounties aren't shouted publicly
+            Confidence = 0.85f,
+            BaseConfidence = 0.85f,
+            ObservedDate = state.Date,
+            HopCount = 0,
+            SourceHolder = new IndividualHolder(npc.Id),
+        };
+
+        state.Knowledge.AddFact(new PortHolder(npc.LocationPortId!.Value), fact);
+        state.Quests.RecordCooldown(targetKey, state.Date.Advance(30));
+    }
+
+    private void TryPatronageTrigger(Individual npc, WorldState state)
+    {
+        const float AllyThreshold = 50f;
+
+        // Find best ally
+        foreach (var ((observer, subject), rel) in state.RelationshipMatrix)
+        {
+            if (observer != npc.Id) continue;
+            if (rel < AllyThreshold) continue;
+            if (!state.Individuals.TryGetValue(subject, out var ally) || !ally.IsAlive) continue;
+
+            // Share highest-confidence PortPriceClaim from our knowledge
+            var npcHolder = new IndividualHolder(npc.Id);
+            var bestPriceFact = state.Knowledge.GetFacts(npcHolder)
+                .Where(f => !f.IsSuperseded && f.Claim is PortPriceClaim && f.Confidence > 0.60f)
+                .OrderByDescending(f => f.Confidence)
+                .FirstOrDefault();
+
+            if (bestPriceFact is null) continue;
+
+            // Inject directly into ally's IndividualHolder — exclusive intel
+            var allyHolder = new IndividualHolder(subject);
+            var existing = state.Knowledge.GetFacts(allyHolder)
+                .Any(f => !f.IsSuperseded
+                    && KnowledgeFact.GetSubjectKey(f.Claim) == KnowledgeFact.GetSubjectKey(bestPriceFact.Claim));
+            if (existing) continue;
+
+            state.Knowledge.AddFact(allyHolder, bestPriceFact);
+            break; // one patronage action per tick per NPC
+        }
     }
 
     /// <summary>

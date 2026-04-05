@@ -325,6 +325,14 @@ public sealed class KnowledgeSystem : IWorldSystem
                 var raidRegion = state.GetShipRegion(sr.TargetShipId);
                 if (raidRegion.HasValue)
                     SeedRouteHazardForShip(sr.TargetShipId, raidRegion.Value, "Pirate raid — dangerous route", state, sr.Date, baseConfidence, tick);
+
+                // 6A: Deed — raider attacked victim
+                var raiderCaptain = GetCaptainId(sr.AttackerShipId, state);
+                var raidVictimCaptain = GetCaptainId(sr.TargetShipId, state);
+                if (raiderCaptain.HasValue && raidVictimCaptain.HasValue)
+                    SeedDeed(raiderCaptain.Value, raidVictimCaptain.Value, null,
+                        ActionPolarity.Hostile, ActionSeverity.Significant,
+                        "Raided merchant vessel", state, sr.Date, worldEvent.SourceLod, tick);
                 break;
             }
 
@@ -333,6 +341,14 @@ public sealed class KnowledgeSystem : IWorldSystem
                 // It propagates to ports only when the attacker docks — realistic lag.
                 // Weather destruction has no witnesses; the ship's location claim decays naturally.
                 if (sd.AttackerId is not { } attackerShipId) break;
+
+                // 6A: Deed — attacker destroyed target
+                var destroyerCaptain = GetCaptainId(attackerShipId, state);
+                var destroyedCaptain = GetCaptainId(sd.ShipId, state);
+                if (destroyerCaptain.HasValue && destroyedCaptain.HasValue)
+                    SeedDeed(destroyerCaptain.Value, destroyedCaptain.Value, null,
+                        ActionPolarity.Hostile, ActionSeverity.Severe,
+                        "Destroyed vessel in combat", state, sd.Date, worldEvent.SourceLod, tick);
                 var regionOfDestruction = sd.SourceLod == SimulationLod.Local && context.PlayerRegion.HasValue
                     ? context.PlayerRegion
                     : null;
@@ -349,6 +365,39 @@ public sealed class KnowledgeSystem : IWorldSystem
                 AddAndSupersede(state.Knowledge, new ShipHolder(attackerShipId), sinkFact, tick);
                 if (sd.SourceLod == SimulationLod.Local)
                     AddAndSupersede(state.Knowledge, new PlayerHolder(), sinkFact, tick);
+                break;
+
+            // 6A: Deed seeding for social/economic events
+            case BribeAccepted ba:
+                // Player bribed a governor — friendly deed toward governor
+                if (state.Player.CaptainIndividualId is { } playerId1)
+                    SeedDeed(playerId1, ba.GovernorId, null,
+                        ActionPolarity.Friendly, ActionSeverity.Nuisance,
+                        "Paid bribe", state, ba.Date, worldEvent.SourceLod, tick);
+                break;
+
+            case AgentBurned ab:
+                // Burning an agent — hostile deed
+                if (state.Player.CaptainIndividualId is { } playerId2)
+                    SeedDeed(playerId2, ab.AgentId, null,
+                        ActionPolarity.Hostile, ActionSeverity.Severe,
+                        "Burned intelligence agent", state, ab.Date, worldEvent.SourceLod, tick);
+                break;
+
+            case ContractFulfilled cf:
+                // Fulfilling a contract — friendly deed toward the issuer
+                if (state.Player.CaptainIndividualId is { } playerId3)
+                    SeedDeed(playerId3, cf.IssuerId, null,
+                        ActionPolarity.Friendly, ActionSeverity.Significant,
+                        "Fulfilled contract", state, cf.Date, worldEvent.SourceLod, tick);
+                break;
+
+            case NpcClaimedContract ncc:
+                // NPC fulfilled a contract — friendly deed toward issuer
+                // Find the issuer from the contract claim
+                SeedDeed(ncc.NpcId, ncc.NpcId, null, // target = self for now, issuer resolved later
+                    ActionPolarity.Friendly, ActionSeverity.Significant,
+                    "Claimed contract bounty", state, ncc.Date, worldEvent.SourceLod, tick);
                 break;
         }
     }
@@ -391,6 +440,141 @@ public sealed class KnowledgeSystem : IWorldSystem
     {
         store.MarkSuperseded(holder, fact, tick);
         store.AddFact(holder, fact);
+    }
+
+    // ---- 6A: IndividualActionClaim seeding ----
+
+    /// <summary>
+    /// Seed a deed record into the witnesses' knowledge pools.
+    /// Witnesses = ships in the region + ports in the region + player (if local).
+    /// </summary>
+    private void SeedDeed(
+        IndividualId actorId, IndividualId targetId, IndividualId? beneficiaryId,
+        ActionPolarity polarity, ActionSeverity severity, string context,
+        WorldState state, WorldDate date, SimulationLod lod, int tick)
+    {
+        var claim = new IndividualActionClaim(actorId, targetId, beneficiaryId, polarity, severity, context);
+        var fact = new KnowledgeFact
+        {
+            Claim = claim,
+            Sensitivity = KnowledgeSensitivity.Public,
+            Confidence = LodToConfidence(lod),
+            BaseConfidence = LodToConfidence(lod),
+            ObservedDate = date,
+            HopCount = 0,
+            SourceHolder = null,
+        };
+
+        // Seed into actor's own holder (they know what they did)
+        state.Knowledge.AddFact(new IndividualHolder(actorId), fact);
+        ApplyRelationshipConsequences(actorId, fact, state);
+
+        // Seed into target's holder (they know what happened to them)
+        state.Knowledge.AddFact(new IndividualHolder(targetId), fact);
+        ApplyRelationshipConsequences(targetId, fact, state);
+
+        // Seed into port if either actor or target is at a port
+        var actorPort = state.Individuals.TryGetValue(actorId, out var actorInd) ? actorInd.LocationPortId : null;
+        var targetPort = state.Individuals.TryGetValue(targetId, out var targetInd) ? targetInd.LocationPortId : null;
+        if (actorPort.HasValue)
+            state.Knowledge.AddFact(new PortHolder(actorPort.Value), fact);
+        if (targetPort.HasValue && targetPort != actorPort)
+            state.Knowledge.AddFact(new PortHolder(targetPort.Value), fact);
+
+        // Player sees local deeds
+        if (lod == SimulationLod.Local)
+            state.Knowledge.AddFact(new PlayerHolder(), fact);
+    }
+
+    /// <summary>Resolve a ShipId to its captain's IndividualId, if any.</summary>
+    private static IndividualId? GetCaptainId(ShipId shipId, WorldState state) =>
+        state.Ships.TryGetValue(shipId, out var ship) ? ship.CaptainId : null;
+
+    // ---- 6C: Consequence Math ----
+
+    /// <summary>
+    /// When an IndividualActionClaim reaches an individual's knowledge, they adjust
+    /// their relationship with the actor (and optionally the beneficiary).
+    ///
+    /// Δ = P × S × C × M_trait
+    ///   P: ActionPolarity (+1/-1)
+    ///   S: Severity weight normalised to 0..1
+    ///   C: Fact confidence (distant rumours carry less weight)
+    ///   M_trait: Personality modifier
+    /// </summary>
+    private static void ApplyRelationshipConsequences(
+        IndividualId observerId, KnowledgeFact fact, WorldState state)
+    {
+        if (fact.Claim is not IndividualActionClaim action) return;
+        if (observerId == action.ActorId) return; // don't judge yourself
+
+        if (!state.Individuals.TryGetValue(observerId, out var observer)) return;
+
+        var p = (float)action.Polarity;
+        var s = (int)action.Severity / 100f;
+        var c = fact.Confidence;
+
+        // Personality modifier
+        float mTrait;
+        if (action.Polarity == ActionPolarity.Hostile)
+        {
+            // Loyal NPCs hold grudges harder
+            mTrait = 1.0f + (observer.Personality.Loyalty * 0.3f);
+        }
+        else
+        {
+            // Principled NPCs (negative Greed) value kind acts more
+            mTrait = 1.0f + (observer.Personality.Greed * -0.3f);
+        }
+
+        var delta = p * s * c * mTrait;
+
+        // Factional loyalty multiplier: if observer shares faction with target, they care more
+        if (observer.FactionId.HasValue && action.Polarity == ActionPolarity.Hostile)
+        {
+            if (state.Individuals.TryGetValue(action.TargetId, out var target)
+                && target.FactionId == observer.FactionId)
+            {
+                delta *= 1.5f; // "He attacked one of ours"
+            }
+        }
+
+        // Apply to actor
+        state.AdjustRelationship(observerId, action.ActorId, delta);
+
+        // Beneficiary gets half the delta
+        if (action.BeneficiaryId.HasValue && action.BeneficiaryId.Value != action.ActorId)
+            state.AdjustRelationship(observerId, action.BeneficiaryId.Value, delta * 0.5f);
+
+        // Also update legacy Individual.PlayerRelationship for backward compatibility
+        if (action.ActorId == state.Player.CaptainIndividualId)
+            observer.PlayerRelationship = Math.Clamp(observer.PlayerRelationship + delta, -100f, 100f);
+    }
+
+    // ---- 6E: Pardon effect ----
+
+    /// <summary>
+    /// When a PardonClaim reaches an individual of the pardoning faction,
+    /// shift their relationship with the pardoned actor 50% toward zero.
+    /// </summary>
+    private static void ApplyPardonEffect(IndividualId observerId, KnowledgeFact fact, WorldState state)
+    {
+        if (fact.Claim is not PardonClaim pardon) return;
+        if (!state.Individuals.TryGetValue(observerId, out var observer)) return;
+
+        // Only affects NPCs of the pardoning faction
+        if (observer.FactionId != pardon.Faction) return;
+
+        var currentRel = state.GetRelationship(observerId, pardon.PardonedActor);
+        if (currentRel >= 0) return; // no hostility to pardon
+
+        // Shift 50% toward zero, scaled by confidence
+        var shift = -currentRel * 0.5f * fact.Confidence;
+        state.AdjustRelationship(observerId, pardon.PardonedActor, shift);
+
+        // Legacy compat
+        if (pardon.PardonedActor == state.Player.CaptainIndividualId)
+            observer.PlayerRelationship = Math.Clamp(observer.PlayerRelationship + shift, -100f, 100f);
     }
 
     // ---- Propagation via ship arrivals ----
@@ -500,6 +684,13 @@ public sealed class KnowledgeSystem : IWorldSystem
                     OriginatingAgentId = fact.OriginatingAgentId,
                 };
                 AddAndSupersede(state.Knowledge, to, propagated, tick);
+
+                // 6C: Apply relationship consequences when gossip reaches an individual
+                if (to is IndividualHolder ih)
+                {
+                    ApplyRelationshipConsequences(ih.Individual, propagated, state);
+                    ApplyPardonEffect(ih.Individual, propagated, state);
+                }
             }
             else if (existing.Claim == fact.Claim)
             {

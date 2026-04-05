@@ -21,6 +21,11 @@ public enum ContractConditionType
     GoodsDelivered,
 }
 
+// ---- Deed ledger enums (6A) ----
+
+public enum ActionSeverity { Nuisance = 15, Significant = 35, Severe = 60, Heroic = 100 }
+public enum ActionPolarity { Hostile = -1, Friendly = 1 }
+
 // ---- Knowledge holder union ----
 
 public abstract record KnowledgeHolderId;
@@ -77,6 +82,30 @@ public record IndividualAllegianceClaim(
     IndividualId Individual,
     FactionId ClaimedFaction,
     FactionId? ActualFaction) : KnowledgeClaim;
+
+/// <summary>
+/// Universal deed record: "Actor X did Y to Target Z."
+/// Propagates as gossip — distant deeds become rumours.
+/// When ingested by an IndividualHolder, triggers relationship mutation (6C).
+/// BeneficiaryId tracks who ordered/paid for the act (e.g., the governor who posted the bounty).
+/// </summary>
+/// <summary>
+/// A pardon issued by a governor/official, clearing hostilities for a specific actor
+/// within a faction. When propagated, accelerates forgetting of hostile deeds and
+/// shifts relationships toward neutral.
+/// </summary>
+public record PardonClaim(
+    IndividualId GrantedBy,
+    FactionId Faction,
+    IndividualId PardonedActor) : KnowledgeClaim;
+
+public record IndividualActionClaim(
+    IndividualId ActorId,
+    IndividualId TargetId,
+    IndividualId? BeneficiaryId,
+    ActionPolarity Polarity,
+    ActionSeverity Severity,
+    string Context) : KnowledgeClaim;
 
 // ---- KnowledgeFact ----
 
@@ -183,6 +212,8 @@ public sealed class KnowledgeFact
         ContractClaim c                 => $"Contract:{c.IssuerId.Value}:{c.TargetSubjectKey}",
         OceanPoiClaim c                 => $"Poi:{c.Poi.Value}",
         IndividualAllegianceClaim c     => $"Allegiance:{c.Individual.Value}",
+        PardonClaim c                  => $"Pardon:{c.Faction.Value}:{c.PardonedActor.Value}",
+        IndividualActionClaim c        => $"Action:{c.ActorId.Value}:{c.TargetId.Value}:{c.Context.GetHashCode():X8}",
         _                               => claim.GetType().Name,
     };
 }

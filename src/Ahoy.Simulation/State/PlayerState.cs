@@ -6,6 +6,12 @@ public sealed class PlayerState
 {
     public required string CaptainName { get; set; }
 
+    /// <summary>
+    /// The player's identity in the Relationship Matrix (6B).
+    /// Allows NPC-to-player relationships to use the same matrix as NPC-to-NPC.
+    /// </summary>
+    public IndividualId CaptainIndividualId { get; set; } = new(Guid.NewGuid());
+
     /// <summary>The player's flagship / primary vessel.</summary>
     public ShipId? FlagshipId { get; set; }
 
