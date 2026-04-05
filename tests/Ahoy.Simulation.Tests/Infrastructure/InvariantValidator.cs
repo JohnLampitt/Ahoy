@@ -39,6 +39,21 @@ public static class InvariantValidator
         foreach (var port in state.Ports.Values)
             if (port.Prosperity < 0 || port.Prosperity > 100)
                 v.Add($"Port {port.Name} prosperity out of bounds: {port.Prosperity}");
+
+        // Economic velocity: gold should be circulating, not hoarded in one place.
+        // If any single faction holds >80% of total gold, the economy has deadlocked.
+        var totalGold = state.Factions.Values.Sum(f => (long)f.TreasuryGold)
+            + state.Individuals.Values.Sum(i => (long)i.CurrentGold)
+            + state.Ships.Values.Sum(s => (long)s.GoldOnBoard);
+        if (totalGold > 0)
+        {
+            foreach (var faction in state.Factions.Values)
+            {
+                var share = (float)faction.TreasuryGold / totalGold;
+                if (share > 0.80f)
+                    v.Add($"Economic deadlock: {faction.Name} holds {share:P0} of total gold ({faction.TreasuryGold}/{totalGold})");
+            }
+        }
     }
 
     private static void ValidateEpistemics(WorldState state, List<string> v)
@@ -59,6 +74,18 @@ public static class InvariantValidator
                 if (group.Count() > 2) // >2 is definitely wrong; 2 is a conflict
                     v.Add($"Holder {holder} has {group.Count()} non-superseded facts for subject {group.Key}");
             }
+        }
+
+        // Echo chamber check: no fact should have CorroborationCount > 10 without
+        // at least 3 distinct CorroboratingFactionIds. If a rumour bounced between
+        // allied ships 50 times, the faction-origin guard should have capped it.
+        foreach (var fact in allFacts)
+        {
+            if (fact.IsSuperseded) continue;
+            if (fact.CorroborationCount > 10 && fact.CorroboratingFactionIds.Count < 3)
+                v.Add($"Echo chamber: fact {fact.Id} has {fact.CorroborationCount} corroborations " +
+                      $"from only {fact.CorroboratingFactionIds.Count} distinct factions " +
+                      $"(subject: {KnowledgeFact.GetSubjectKey(fact.Claim)})");
         }
     }
 

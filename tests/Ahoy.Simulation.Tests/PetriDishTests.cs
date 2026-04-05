@@ -204,4 +204,77 @@ public class PetriDishTests
         bool plagueCleared = !state.Ports[port].Conditions.HasFlag(PortConditionFlags.Plague);
         Assert.True(plagueCleared, "Plague should be cleared after medicine delivery");
     }
+
+    /// <summary>
+    /// The False Flag Test: An NPC flying Dutch false colours (ClaimedOwnerFactionId)
+    /// sinks a Spanish ship. The deed claim should attribute the attack to the Dutch
+    /// (what witnesses see), not the actual attacker's faction. Spain's relationship
+    /// with the Dutch should worsen — the epistemic system is properly flawed.
+    /// </summary>
+    [Fact]
+    public void FalseFlag_BlameGoesToClaimedFaction()
+    {
+        var builder = new ScenarioBuilder(seed: 500);
+        var region = builder.AddRegion("Caribbean");
+        var spain = builder.AddFaction("Spain");
+        var dutch = builder.AddFaction("Netherlands");
+        var pirates = builder.AddFaction("Pirates", FactionType.PirateBrotherhood);
+        builder.SetFactionRelationship(spain, dutch, 10f); // neutral-positive
+
+        var port = builder.AddPort("Havana", region, spain);
+
+        // Spanish captain and ship
+        var spanishCaptain = builder.AddIndividual("Don", "Garcia", IndividualRole.NavalOfficer,
+            factionId: spain, locationPort: port);
+        builder.AddShip("San Felipe", spain, captainId: spanishCaptain, dockedAt: port);
+
+        // Pirate captain flying Dutch false colours
+        var pirateCaptain = builder.AddIndividual("Henry", "Morgan", IndividualRole.PirateCaptain,
+            factionId: pirates, locationPort: port);
+        var pirateShipId = builder.AddShip("Satisfaction", pirates, captainId: pirateCaptain, dockedAt: port);
+
+        var (engine, state) = builder.BuildWithState();
+
+        // Set false colours on the pirate ship
+        state.Ships[pirateShipId].ClaimedOwnerFactionId = dutch;
+
+        // Seed a hostile deed claim as if witnesses saw a "Dutch" ship attack a Spanish ship.
+        // In the real sim this would fire from ShipRaided/ShipDestroyed events, but witnesses
+        // would see ClaimedOwnerFactionId. We simulate the epistemic output directly.
+        var deedClaim = new IndividualActionClaim(
+            pirateCaptain, spanishCaptain, null,
+            ActionPolarity.Hostile, ActionSeverity.Severe, "Sank vessel under Dutch colours");
+
+        // Seed into the port — all NPCs in Havana hear about this
+        state.Knowledge.AddFact(new PortHolder(port), new KnowledgeFact
+        {
+            Claim = deedClaim,
+            Sensitivity = KnowledgeSensitivity.Public,
+            Confidence = 0.85f,
+            BaseConfidence = 0.85f,
+            ObservedDate = state.Date,
+        });
+
+        // Run ticks so gossip propagates and relationships shift
+        for (int i = 0; i < 15; i++)
+            engine.Tick();
+
+        // Assert: Spain's relationship with the Dutch should have worsened
+        // (because witnesses saw "Dutch" colours, not pirate colours)
+        var spainDutchRel = state.Factions[spain].Relationships.GetValueOrDefault(dutch);
+        Assert.True(spainDutchRel <= 10f,
+            $"Spain-Dutch relationship should have worsened from 10, got {spainDutchRel}");
+
+        // The deed is attributed to the pirate captain personally, but the faction
+        // perception flows through the false colours. Spanish NPCs who hear the gossip
+        // should have negative relationship with the pirate captain.
+        var spanishGovernor = state.Individuals.Values
+            .FirstOrDefault(i => i.Role == IndividualRole.Governor && i.FactionId == spain);
+        if (spanishGovernor is not null)
+        {
+            var govRelWithPirate = state.GetRelationship(spanishGovernor.Id, pirateCaptain);
+            Assert.True(govRelWithPirate < 0,
+                $"Spanish governor should dislike the attacker, got {govRelWithPirate}");
+        }
+    }
 }
