@@ -354,4 +354,129 @@ public class GroupFeatureTests
             $"Food cargo={ship.Cargo.GetValueOrDefault(TradeGood.Food)}, " +
             $"Route={ship.Route?.GetType().Name ?? "null"}, Location={ship.Location}");
     }
+
+    // ---- Group 7 Crisis 6: War + Letters of Marque ----
+
+    [Fact]
+    public void War_GovernorSeedsLettersOfMarque_AgainstEnemyShips()
+    {
+        var builder = new ScenarioBuilder(seed: 709);
+        var region = builder.AddRegion("Caribbean");
+        var spain = builder.AddFaction("Spain", treasury: 10000);
+        var england = builder.AddFaction("England", treasury: 10000);
+        var port = builder.AddPort("Havana", region, spain);
+
+        var governor = builder.AddIndividual("Don", "Garcia", IndividualRole.Governor,
+            factionId: spain, locationPort: port, gold: 1000);
+
+        // English ship in the region — potential target
+        var enemyShipId = builder.AddShip("HMS Victory", england, dockedAt: port, guns: 20);
+
+        var (engine, state) = builder.BuildWithState();
+
+        // Declare war
+        state.Factions[spain].DeclareWarOn(england, state.Factions[england]);
+
+        for (int i = 0; i < 10; i++)
+            engine.Tick();
+
+        // Governor should have seeded a TargetDestroyed contract against the English ship
+        var portFacts = state.Knowledge.GetFacts(new PortHolder(port));
+        var letterOfMarque = portFacts.FirstOrDefault(f => !f.IsSuperseded
+            && f.Claim is ContractClaim cc
+            && cc.Condition == ContractConditionType.TargetDestroyed
+            && cc.TargetSubjectKey.Contains(enemyShipId.Value.ToString()));
+
+        Assert.NotNull(letterOfMarque);
+    }
+
+    // ---- Group 9 Phase 4: Defection Trigger ----
+
+    /// <summary>
+    /// Directly seed a ReliefDenialClaim into a governor's knowledge.
+    /// The governor should defect when relationship with viceroy is nemesis
+    /// and the port is starving.
+    /// </summary>
+    [Fact]
+    public void DefectionTrigger_GovernorFlipsPort_WhenDeniedAndStarving()
+    {
+        var builder = new ScenarioBuilder(seed: 710);
+        var region = builder.AddRegion("Caribbean");
+        var spain = builder.AddFaction("Spain", treasury: 1000);
+        var capital = builder.AddPort("Havana", region, spain, population: 8000);
+        var colony = builder.AddPort("Outpost", region, spain, population: 1000);
+
+        var viceroy = builder.AddIndividual("Don", "Viceroy", IndividualRole.Governor,
+            factionId: spain, locationPort: capital, gold: 5000);
+        var governor = builder.AddIndividual("Don", "Colonial", IndividualRole.Governor,
+            factionId: spain, locationPort: colony, gold: 100);
+
+        var (engine, state) = builder.BuildWithState();
+
+        // Set the colony to starving
+        state.Ports[colony].Economy.Supply[TradeGood.Food] = 0;
+        state.Ports[colony].SetCondition(PortConditionFlags.Famine, true);
+
+        // Set nemesis relationship between governor and viceroy
+        state.AdjustRelationship(governor, viceroy, -80f);
+
+        // Seed the denial directly into governor's knowledge (simulates courier arrival)
+        var crisisId = Guid.NewGuid();
+        state.Ports[colony].ActiveCrisisId = crisisId;
+        state.Knowledge.AddFact(new IndividualHolder(governor), new KnowledgeFact
+        {
+            Claim = new ReliefDenialClaim(colony, crisisId, spain),
+            Sensitivity = KnowledgeSensitivity.Restricted,
+            Confidence = 0.95f,
+            BaseConfidence = 0.95f,
+            ObservedDate = state.Date,
+        });
+
+        for (int i = 0; i < 5; i++)
+            engine.Tick();
+
+        // The colony should have defected — no longer controlled by Spain
+        Assert.Null(state.Ports[colony].ControllingFactionId);
+        Assert.False(state.Factions[spain].ControlledPorts.Contains(colony));
+    }
+
+    // ---- Group 9 Phase 3: SVS Triage ----
+
+    /// <summary>
+    /// A high-value port should get relief approved. A low-value port should be denied.
+    /// We test indirectly: a faction with low treasury facing a request from a tiny port
+    /// should deny it.
+    /// </summary>
+    [Fact]
+    public void SvsTriage_DeniesRelief_ForLowValuePort()
+    {
+        var builder = new ScenarioBuilder(seed: 711);
+        var region = builder.AddRegion("Caribbean");
+        var spain = builder.AddFaction("Spain", treasury: 500); // broke faction
+        var capital = builder.AddPort("Havana", region, spain, population: 8000);
+        var outpost = builder.AddPort("Tiny Outpost", region, spain, population: 300);
+
+        var viceroy = builder.AddIndividual("Don", "Viceroy", IndividualRole.Governor,
+            factionId: spain, locationPort: capital, gold: 100);
+        builder.AddIndividual("Don", "Outpost", IndividualRole.Governor,
+            factionId: spain, locationPort: outpost, gold: 50);
+
+        // Seed a relief request into the viceroy's knowledge (simulates courier arrival)
+        var crisisId = Guid.NewGuid();
+        builder.SeedFact(new IndividualHolder(viceroy),
+            new ReliefRequestClaim(outpost, crisisId, 50, 5000), // requesting 5000g — more than treasury
+            confidence: 0.95f, sensitivity: KnowledgeSensitivity.Restricted);
+
+        var (engine, state) = builder.BuildWithState();
+
+        for (int i = 0; i < 3; i++)
+            engine.Tick();
+
+        // The viceroy should have denied — check for ReliefDenialClaim in viceroy's knowledge
+        var viceroyFacts = state.Knowledge.GetFacts(new IndividualHolder(viceroy));
+        var denial = viceroyFacts.FirstOrDefault(f => !f.IsSuperseded
+            && f.Claim is ReliefDenialClaim rdc && rdc.CrisisId == crisisId);
+
+        Assert.NotNull(denial);
+    }
 }
