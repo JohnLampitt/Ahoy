@@ -134,16 +134,48 @@ knowledge-driven objective (bounties, trade, investigation, flight).
 
 **File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
 
-The system evaluates NPCs for systemic goals, not just contract scanning:
-- **Rule-based default:** For each alive Individual with a combat role
-  (PirateCaptain, NavalOfficer, Privateer, Informant), scan their
-  `IndividualHolder` for high-confidence `ContractClaim` facts (> 0.40)
-  with supporting intel (> 0.50). If found, assign a `FulfillContractGoal`.
-- Informants eligible only for `TargetDead` contracts (assassination/sabotage).
-- **Future LLM hook:** Goal assignment is the point where the LLM can override
-  rule-based selection based on personality, grudges, risk assessment. This is
-  completely decoupled from the simulation loop — the LLM influences *what* goal
-  is chosen, the EpistemicResolver handles *how* it's executed.
+Goal assignment triggers when an NPC's `GoalPursuit` is in the `Pondering`
+state — which occurs when an NPC spawns, finishes a goal, or abandons a
+stalled goal.
+
+**Part 1 — Rule-based fallback (always available, synchronous):**
+
+For each Pondering NPC with a combat role (PirateCaptain, NavalOfficer,
+Privateer, Informant), scan their `IndividualHolder` for high-confidence
+`ContractClaim` facts (> 0.40) with supporting intel (> 0.50). Score
+candidates by personality-weighted utility (e.g., Greedy captains weight
+gold reward higher; Cautious captains penalise low-confidence intel).
+Assign the highest-scoring goal as `FulfillContractGoal`. Informants
+eligible only for `TargetDead` contracts.
+
+If no actionable contract: assign a default goal appropriate to role
+(trade routing for merchants, patrol for naval officers, etc.).
+
+**Part 2 — LLM strategic goal selection (optional, async):**
+
+When QuestSystem (tick 7) detects a Pondering NPC, it dispatches an async
+request to the LLM service via the existing `DecisionQueue` infrastructure.
+
+**The prompt payload** — the engine synthesises the NPC's epistemic reality
+into a structured payload:
+- **Identity:** Role, PersonalityTraits (Greed, Boldness, Cunning, Loyalty)
+- **Knowledge:** Top 5 highest-confidence facts from their IndividualHolder
+  (known bounties, port wealth, ship locations, faction intentions, etc.)
+- **Resources:** Ship status (hull, crew, cargo), CurrentGold
+- **Context:** Current location, active conflicts in held knowledge
+
+**The async callback** — the LLM evaluates the payload and returns a
+structured decision (e.g., `{"GoalType": "FulfillContract",
+"TargetSubject": "Ship:1234"}`). The callback safely queues this mutation
+for the next tick, assigning the new `NpcGoal` and transitioning the
+pursuit state from Pondering to Active.
+
+**Fallback guarantee:** The rule-based path assigns a goal immediately on
+the same tick. If the LLM responds before the next tick, it can override
+the rule-based goal. If the LLM is slow or unavailable, the NPC already
+has a valid goal — the world never stalls waiting for LLM responses. This
+is the same pattern as the existing `DecisionQueue` for player-facing NPC
+interactions.
 
 #### 5B-2: Goal Pursuit & Resolver Model (replaces "Contract Pursuit Model")
 
@@ -165,7 +197,7 @@ public record FulfillContractGoal(
 
 // ---- The State Machine ----
 
-public enum PursuitState { Active, Stalled, Completed, Abandoned }
+public enum PursuitState { Pondering, Active, Stalled, Completed, Abandoned }
 
 public sealed class GoalPursuit
 {

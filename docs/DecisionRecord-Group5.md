@@ -127,8 +127,10 @@ cleanly separates these:
 
 - **NpcGoal** (the behavioural objective): `FulfillContractGoal`,
   future `TradeGoal`, `InvestigateGoal`, `FleeGoal`, etc. Immutable record.
-- **GoalPursuit** (the execution state machine): `Active → Stalled → Abandoned`
-  or `Active → Completed`. Tracks `TicksStalled`. Wraps an `NpcGoal`.
+- **GoalPursuit** (the execution state machine):
+  `Pondering → Active → Stalled → Abandoned` or `Active → Completed`.
+  Tracks `TicksStalled`. Wraps an `NpcGoal`. Pondering state triggers
+  goal assignment (rule-based immediate + optional async LLM override).
 
 ```csharp
 // WorldState.cs
@@ -145,6 +147,27 @@ What do they need to know? What's the next primitive action to close that gap?
 The resolver doesn't know what kind of goal it's executing — it evaluates the
 NPC's knowledge state against the goal's requirements and returns the next
 action (set PursuitRoute, investigate, intercept, stall).
+
+### LLM Strategic Goal Selection — **New addition**
+
+When an NPC enters `Pondering` state (spawn, goal completed, goal abandoned),
+QuestSystem dispatches an async LLM request via DecisionQueue:
+
+**Prompt payload** (synthesised from NPC's epistemic reality):
+- Identity: Role, PersonalityTraits (Greed, Boldness, Cunning, Loyalty)
+- Knowledge: Top 5 highest-confidence IndividualHolder facts
+- Resources: Ship status, CurrentGold
+- Context: Current location, active knowledge conflicts
+
+**Async callback:** LLM returns structured decision
+(`{"GoalType": "FulfillContract", "TargetSubject": "Ship:1234"}`).
+Callback queues the goal mutation for the next tick, transitioning
+Pondering → Active.
+
+**Fallback guarantee:** Rule-based scoring assigns a goal immediately on
+the same tick (synchronous). LLM response can override on the next tick
+if it arrives in time. World never stalls waiting for LLM. Same pattern
+as existing DecisionQueue for player-facing NPC interactions.
 
 ### Stall & Leak mechanic — **New addition**
 
