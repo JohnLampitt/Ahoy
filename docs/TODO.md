@@ -132,6 +132,28 @@ the system it affects, the symptom, and the intended fix.
 
 ---
 
+## Future — Design Ideas
+
+### Independent Port Federation / Republic Mechanic
+- **Context:** Group 9 (Colonial Triage) introduces individual port defection.
+  When a faction denies relief, a governor can flip their port to Independent.
+  Currently each port defects individually.
+- **Idea:** Adjacent independent ports could voluntarily merge into a new
+  "Independent Republic" faction entity. This would require:
+  - A new faction type (Republic) with elected leadership, shared treasury
+  - Mechanic for independent governors to propose federation (relationship > +30
+    between governors, both independent, adjacent regions)
+  - Unified AI for the republic: collective defense, shared trade policy
+  - Diplomatic recognition from colonial factions (treaties, trade agreements)
+- **Gameplay value:** Creates a third force in the Caribbean — not colonial, not
+  pirate. The player could be the broker who unifies scattered independent ports
+  into a viable republic, or the privateer hired to break one apart.
+- **Deferred until:** Group 9 is implemented and individual defection is proven.
+  Federation adds significant faction system complexity that isn't justified
+  until we see how often multi-port independence clusters emerge organically.
+
+---
+
 ## Low — Cosmetic / Documentation
 
 ### SDD-Architecture Project Tree Outdated

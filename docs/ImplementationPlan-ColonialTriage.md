@@ -233,18 +233,34 @@ Phase 4 — Pirate haven emergence from power vacuum
 
 ---
 
-## Open Questions (for Review)
+## Resolved Questions
 
-1. Should independent ports have reduced external food imports (no faction
-   supply ships) or increased (neutral ports attract more traders)?
+### Q1: Independent port food imports → Reduced to 50%
+Independent ports lose faction supply convoys but attract opportunistic
+merchants. Set `InjectExternalFood` to 50% of normal rate for ports with
+no `ControllingFactionId`. Creates a survival window without making
+independence free. The player or pirate merchants filling the gap is the
+gameplay.
 
-2. Should the player be able to trigger defection deliberately by blockading
-   a port until it starves and the faction denies relief? (Yes — this is
-   the intended gameplay loop, but it should have consequences: the original
-   faction blames the player if they know the blockade caused it.)
+### Q2: Player-triggered defection → Yes, with consequences
+The player can deliberately blockade a port until the faction denies relief
+and the governor defects. But existing mechanics connect the dots: the
+player's blockade generates `ShipLocationClaim` placing them in the region
++ `IndividualActionClaim(Hostile, Severe, "Blockaded port")`. The faction
+leader sees both deeds in their knowledge. The player's relationship with
+the original faction tanks — they trade one enemy for another.
 
-3. Should multiple ports be able to defect simultaneously into a new
-   "Independent Republic" faction, or does each port defect individually?
+### Q3: Multi-port republics → Individual defection only (for now)
+Each port defects individually. Multi-port republics require a new faction
+entity and unified AI — deferred to a future "Federation" mechanic where
+adjacent independent ports voluntarily merge. Individual defections produce
+more narrative variety: one port goes pirate, another stays independent,
+a third gets recaptured.
 
-4. What happens to the governor's personal gold and authority after defection?
-   Do they start fresh or carry their wealth into independence?
+### Q4: Governor retains gold and authority, with decay
+The governor keeps both — they're the same person, they just switched sides.
+Gold funds initial independent relief contracts. Authority determines
+governance stability (high = smooth transition, low = chaos → easy pirate
+prey). Add 0.5/tick authority drain for independent ports with no faction
+backing. When authority hits 0, the governor is powerless — pirates or any
+faction can walk in unopposed.
