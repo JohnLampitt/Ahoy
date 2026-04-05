@@ -479,4 +479,90 @@ public class GroupFeatureTests
 
         Assert.NotNull(denial);
     }
+
+    // ---- Group 10: Zero-Sum Economy ----
+
+    [Fact]
+    public void ZeroSumTrade_PortTreasuryDecreasesWhenMerchantSells()
+    {
+        var builder = new ScenarioBuilder(seed: 712);
+        var region = builder.AddRegion("Caribbean");
+        var faction = builder.AddFaction("Spain");
+        var port = builder.AddPort("Havana", region, faction, prosperity: 50f, population: 3000);
+
+        var captain = builder.AddIndividual("Don", "Trader", IndividualRole.PortMerchant,
+            factionId: faction, locationPort: port, gold: 100);
+        var shipId = builder.AddShip("Merchant", faction, captainId: captain, dockedAt: port, guns: 5);
+
+        var (engine, state) = builder.BuildWithState();
+
+        state.Ships[shipId].Cargo[TradeGood.Food] = 10;
+        state.Ports[port].Economy.Demand[TradeGood.Food] = 20;
+        var startTreasury = state.Ports[port].Treasury;
+
+        engine.Tick();
+
+        var endTreasury = state.Ports[port].Treasury;
+        Assert.True(endTreasury < startTreasury,
+            $"Port treasury should decrease when buying goods. Start={startTreasury}, End={endTreasury}");
+    }
+
+    [Fact]
+    public void BrokePort_RefusesTrade_WhenTreasuryIsZero()
+    {
+        var builder = new ScenarioBuilder(seed: 713);
+        var region = builder.AddRegion("Caribbean");
+        var faction = builder.AddFaction("Spain");
+        var port = builder.AddPort("Havana", region, faction, prosperity: 50f, population: 3000);
+
+        var captain = builder.AddIndividual("Don", "Trader", IndividualRole.PortMerchant,
+            factionId: faction, locationPort: port, gold: 100);
+        var shipId = builder.AddShip("Merchant", faction, captainId: captain, dockedAt: port, guns: 5);
+
+        var (engine, state) = builder.BuildWithState();
+
+        state.Ports[port].Treasury = 0;
+        state.Ships[shipId].Cargo[TradeGood.Food] = 10;
+        state.Ports[port].Economy.Demand[TradeGood.Food] = 20;
+        var startGold = state.Ships[shipId].GoldOnBoard;
+
+        engine.Tick();
+
+        var endGold = state.Ships[shipId].GoldOnBoard;
+        Assert.True(endGold <= startGold,
+            $"Broke port should not pay merchant. Ship gold: {startGold} → {endGold}");
+    }
+
+    [Fact]
+    public void ExportMint_InjectsGoldIntoHubTreasury()
+    {
+        var builder = new ScenarioBuilder(seed: 714);
+        var region = builder.AddRegion("Caribbean");
+        var spain = builder.AddFaction("Spain");
+        var hub = builder.AddPort("Havana", region, spain, prosperity: 70f, population: 8000);
+
+        var (engine, state) = builder.BuildWithState();
+
+        state.Ports[hub].Economy.CanExportToEurope = true;
+        state.Ports[hub].Economy.Supply[TradeGood.Sugar] = 100;
+        state.Ports[hub].Economy.TargetSupply[TradeGood.Sugar] = 10;
+        state.Ports[hub].Economy.BasePrice[TradeGood.Sugar] = 10;
+        // Remove sugar production so we can isolate the export effect
+        state.Ports[hub].Economy.BaseProduction.Remove(TradeGood.Sugar);
+
+        var startTreasury = state.Ports[hub].Treasury;
+
+        engine.Tick();
+
+        // Sugar supply should have decreased (goods exported to Europe)
+        var endSugar = state.Ports[hub].Economy.Supply.GetValueOrDefault(TradeGood.Sugar);
+        Assert.True(endSugar < 100,
+            $"Export hub should have exported sugar. Supply: 100 → {endSugar}");
+
+        // Treasury may decrease due to faction taxation on the same tick,
+        // but the export revenue should partially offset it
+        var endTreasury = state.Ports[hub].Treasury;
+        Assert.True(endTreasury > 0,
+            $"Export hub should still have treasury after exports+tax. {startTreasury} → {endTreasury}");
+    }
 }

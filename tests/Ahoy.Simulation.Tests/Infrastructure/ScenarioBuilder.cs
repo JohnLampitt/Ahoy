@@ -85,6 +85,7 @@ public sealed class ScenarioBuilder
             Prosperity = prosperity,
         };
         port.AdjustPopulation(population - port.Population);
+        port.Treasury = population * 2; // starting treasury proportional to population
 
         // Default economy — produces and consumes basic goods
         var foodNeeded = population / 100;

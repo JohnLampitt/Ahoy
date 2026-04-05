@@ -30,9 +30,34 @@ public sealed class EconomicProfile
     /// <summary>Active price modifiers applied on top of the supply/demand formula.</summary>
     public List<PriceModifier> ActiveModifiers { get; } = new();
 
+    /// <summary>True for faction capitals and major hubs that can export to Europe.
+    /// These ports convert surplus goods into fresh gold (the economy's only faucet).</summary>
+    public bool CanExportToEurope { get; set; }
+
     /// <summary>Essential goods scale non-linearly when scarce — people pay everything they have.</summary>
     public static bool IsEssential(TradeGood good) =>
         good is TradeGood.Food or TradeGood.Medicine or TradeGood.Water;
+
+    /// <summary>
+    /// Fixed European prices — the Caribbean doesn't set world prices.
+    /// Scaled to match the simulation's economic size (~41K starting gold).
+    /// These determine the faucet rate: total gold injection ≈ hubs × goods × price × cap/tick.
+    /// </summary>
+    public static int EuropeanPrice(TradeGood good) => good switch
+    {
+        TradeGood.Gold => 50,
+        TradeGood.Silver => 25,
+        TradeGood.Sugar => 8,
+        TradeGood.Tobacco => 10,
+        TradeGood.Indigo => 12,
+        TradeGood.Rum => 7,
+        TradeGood.Coffee => 10,
+        TradeGood.Cocoa => 8,
+        TradeGood.Cotton => 6,
+        TradeGood.Spices => 15,
+        TradeGood.Silk => 20,
+        _ => 0, // non-exportable
+    };
 
     /// <summary>
     /// Calculates the current effective price for a good.

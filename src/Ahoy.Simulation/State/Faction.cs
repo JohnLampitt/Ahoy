@@ -75,6 +75,13 @@ public sealed class Faction
     /// <summary>Haven presence by region 0–100.</summary>
     public Dictionary<RegionId, float> HavenPresence { get; } = new();
 
+    // --- Sovereign debt (Group 10) ---
+    /// <summary>Accumulated debt to the Crown. Garnishes future export revenue.</summary>
+    public int RoyalDebt { get; set; }
+
+    /// <summary>Ticks until next stipend request is allowed. Simulates Atlantic crossing.</summary>
+    public int StipendCooldownTicks { get; set; }
+
     // --- Intelligence ---
     /// <summary>
     /// Intelligence capability 0..1. Clamped [0.10, 0.95].

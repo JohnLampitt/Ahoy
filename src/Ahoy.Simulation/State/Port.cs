@@ -48,6 +48,9 @@ public sealed class Port
     public float FactionAuthority { get; set; } = 50f;
 
     // --- Economics ---
+    /// <summary>Local gold balance. Merchants are paid from this. Faction taxes drain it.</summary>
+    public int Treasury { get; set; }
+
     public EconomicProfile Economy { get; } = new();
 
     // --- Ships currently docked ---

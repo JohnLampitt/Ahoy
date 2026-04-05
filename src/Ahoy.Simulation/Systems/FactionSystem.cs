@@ -172,19 +172,67 @@ public sealed class FactionSystem : IWorldSystem
         // ~1% chance per tick: plant disinformation in a pirate haven's knowledge pool
         if (_rng.NextDouble() < 0.01)
             SeedDisinformation(faction, factionId, state, context);
-        // Income: port taxes + trade duties (derived from port prosperity)
-        var portIncome = state.Ports.Values
-            .Where(p => p.ControllingFactionId == factionId)
-            .Sum(p => (int)(p.Prosperity * 2.5f)); // rough formula
+        // Group 10: Physical taxation — take 10% of each port's treasury
+        var taxRevenue = 0;
+        foreach (var port in state.Ports.Values.Where(p => p.ControllingFactionId == factionId))
+        {
+            var tax = (int)(port.Treasury * 0.10f);
+            if (tax <= 0) continue;
+            port.Treasury -= tax;
 
-        faction.IncomePerTick = portIncome;
+            // Sovereign debt garnishment: if faction owes the Crown, 50% of tax goes to debt
+            if (faction.RoyalDebt > 0)
+            {
+                var garnishment = (int)(tax * 0.50f);
+                faction.RoyalDebt = Math.Max(0, faction.RoyalDebt - garnishment);
+                tax -= garnishment; // faction keeps the rest
+            }
 
-        // Expenditure: naval maintenance + patrol costs
+            taxRevenue += tax;
+        }
+        faction.IncomePerTick = taxRevenue;
+
+        // Expenditure: naval maintenance (gold destroyed — the sink)
         var navalCost = (int)(faction.NavalStrength * 15f * faction.CurrentNavalAllocationFraction);
         faction.ExpenditurePerTick = navalCost;
 
-        faction.TreasuryGold += faction.IncomePerTick - faction.ExpenditurePerTick;
+        faction.TreasuryGold += taxRevenue - navalCost;
         faction.TreasuryGold = Math.Max(0, faction.TreasuryGold);
+
+        // Sovereign debt cooldown
+        if (faction.StipendCooldownTicks > 0) faction.StipendCooldownTicks--;
+
+        // Royal Stipend: if broke and cooldown expired, request bailout from the Crown
+        if (faction.TreasuryGold <= 0 && faction.StipendCooldownTicks <= 0
+            && faction.Type == FactionType.Colonial)
+        {
+            var stipend = Math.Clamp(navalCost * 20, 2000, 10000);
+            faction.TreasuryGold += stipend;
+            faction.RoyalDebt += (int)(stipend * 1.2f); // 20% interest
+            faction.StipendCooldownTicks = 100; // ~3 months Atlantic delay
+        }
+
+        // Viceroy Recall: if debt exceeds 50,000, Crown recalls the viceroy
+        if (faction.RoyalDebt > 50_000 && faction.Type == FactionType.Colonial)
+        {
+            var capitalPort = state.Ports.Values
+                .Where(p => p.ControllingFactionId == factionId && p.GovernorId.HasValue)
+                .OrderByDescending(p => p.Population)
+                .FirstOrDefault();
+            if (capitalPort?.GovernorId is { } oldViceroyId
+                && state.Individuals.TryGetValue(oldViceroyId, out var oldViceroy))
+            {
+                // Disgrace the old viceroy
+                oldViceroy.Role = IndividualRole.Governor; // TODO: add DisgracedOfficial role
+                capitalPort.GovernorId = null;
+
+                // Reset debt — Crown writes it off as a fresh start
+                faction.RoyalDebt = 0;
+
+                var lod = context.GetLod(capitalPort.RegionId);
+                events.Emit(new ViceroyRecalled(state.Date, lod, factionId, oldViceroyId), lod);
+            }
+        }
 
         // Naval allocation convergence (20%/tick toward desired)
         var allocationDelta = (faction.DesiredNavalAllocationFraction - faction.CurrentNavalAllocationFraction) * 0.20f;
@@ -207,12 +255,17 @@ public sealed class FactionSystem : IWorldSystem
     private void TickPirate(Faction faction, FactionId factionId, WorldState state,
         IEventEmitter events, SimulationContext context)
     {
-        // Income: raiding proceeds + haven fees
-        var raidIncome = (int)(faction.RaidingMomentum * 5f);
-        var havenFees = faction.HavenPresence.Values.Sum(h => (int)(h * 0.8f));
-        faction.IncomePerTick = raidIncome + havenFees;
-
-        faction.TreasuryGold += faction.IncomePerTick;
+        // Group 10: Pirate income from physical taxation of haven ports (same as colonial)
+        var pirateTax = 0;
+        foreach (var port in state.Ports.Values.Where(p => p.ControllingFactionId == factionId))
+        {
+            var tax = (int)(port.Treasury * 0.10f);
+            if (tax <= 0) continue;
+            port.Treasury -= tax;
+            pirateTax += tax;
+        }
+        faction.IncomePerTick = pirateTax;
+        faction.TreasuryGold += pirateTax;
 
         // Cohesion drift
         if (faction.RaidingMomentum > 60f)

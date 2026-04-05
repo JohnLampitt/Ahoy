@@ -57,6 +57,9 @@ public sealed class EconomySystem : IWorldSystem
             // Production and non-essential consumption
             ProduceAndConsume(port, lod);
 
+            // Group 10: Export surplus goods to Europe (the economy's only gold faucet)
+            TickExports(port);
+
             // Price signal events for visible ports
             if (lod is SimulationLod.Local or SimulationLod.Regional)
                 EmitPriceShifts(port, portId, state, events, lod);
@@ -322,7 +325,7 @@ public sealed class EconomySystem : IWorldSystem
     {
         var economy = port.Economy;
 
-        // SELL cargo the ship is carrying that the port demands
+        // SELL cargo — port pays from its treasury (zero-sum)
         foreach (var (good, qty) in ship.Cargo.ToList())
         {
             var demand = economy.Demand.GetValueOrDefault(good);
@@ -330,21 +333,32 @@ public sealed class EconomySystem : IWorldSystem
 
             var sellQty = Math.Min(qty, demand);
             var price = economy.EffectivePrice(good);
+            var totalCost = price * sellQty;
+
+            // Port can only pay what it has
+            if (port.Treasury < totalCost)
+            {
+                if (port.Treasury <= 0) continue; // broke port — merchant refuses
+                sellQty = Math.Max(1, port.Treasury / price);
+                totalCost = price * sellQty;
+            }
 
             ship.Cargo[good] -= sellQty;
             if (ship.Cargo[good] <= 0) ship.Cargo.Remove(good);
 
             economy.Supply[good] = economy.Supply.GetValueOrDefault(good) + sellQty;
-            economy.Demand[good] -= sellQty;
+            economy.Demand[good] = Math.Max(0, economy.Demand.GetValueOrDefault(good) - sellQty);
 
-            ship.GoldOnBoard += price * sellQty;
-
-            // Credit captain's personal wealth: 10% of trade revenue
+            // Zero-sum transfer: port treasury → ship + captain
+            port.Treasury -= totalCost;
+            var captainCut = 0;
             if (ship.CaptainId.HasValue
                 && state.Individuals.TryGetValue(ship.CaptainId.Value, out var captain))
             {
-                captain.CurrentGold += (int)((price * sellQty) * CaptainIncomeFraction);
+                captainCut = (int)(totalCost * CaptainIncomeFraction);
+                captain.CurrentGold += captainCut;
             }
+            ship.GoldOnBoard += totalCost - captainCut; // ship gets remainder
 
             events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, sellQty, price, false), lod);
         }
@@ -395,15 +409,17 @@ public sealed class EconomySystem : IWorldSystem
             var buyQty = Math.Min(Math.Min(supply, cargoFree), 50);
             if (ship.GoldOnBoard < buyPrice * buyQty) continue;
 
+            var buyCost = buyPrice * buyQty;
             economy.Supply[good] -= buyQty;
             ship.Cargo[good] = ship.Cargo.GetValueOrDefault(good) + buyQty;
-            ship.GoldOnBoard -= buyPrice * buyQty;
+            ship.GoldOnBoard -= buyCost;
+            port.Treasury += buyCost; // port receives payment
             cargoFree -= buyQty;
 
             events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, buyQty, buyPrice, true), lod);
         }
 
-        // Fallback: if no arbitrage opportunities found, buy whatever's cheapest (exploration)
+        // Fallback: if no arbitrage opportunities found, buy whatever's cheapest
         if (opportunities.Count == 0)
         {
             foreach (var (good, supply) in economy.Supply.OrderBy(kv => economy.EffectivePrice(kv.Key)))
@@ -413,13 +429,45 @@ public sealed class EconomySystem : IWorldSystem
                 var buyQty = Math.Min(Math.Min(supply, cargoFree), 50);
                 if (ship.GoldOnBoard < price * buyQty) continue;
 
+                var cost = price * buyQty;
                 economy.Supply[good] -= buyQty;
                 ship.Cargo[good] = ship.Cargo.GetValueOrDefault(good) + buyQty;
-                ship.GoldOnBoard -= price * buyQty;
+                ship.GoldOnBoard -= cost;
+                port.Treasury += cost; // port receives payment
                 cargoFree -= buyQty;
 
                 events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, buyQty, price, true), lod);
             }
+        }
+    }
+
+    // ---- Group 10 Phase 2: Export Mint ----
+
+    /// <summary>
+    /// The economy's only gold faucet. Export hubs sell surplus goods to Europe
+    /// at fixed world prices, converting physical goods into fresh gold.
+    /// </summary>
+    private static void TickExports(Port port)
+    {
+        if (!port.Economy.CanExportToEurope) return;
+
+        const int MaxExportPerGoodPerTick = 3; // conservative — prevents gold hyperinflation
+        var economy = port.Economy;
+
+        foreach (var good in economy.Supply.Keys.ToList())
+        {
+            var euroPrice = EconomicProfile.EuropeanPrice(good);
+            if (euroPrice <= 0) continue; // non-exportable
+
+            var surplus = economy.Supply.GetValueOrDefault(good)
+                        - economy.TargetSupply.GetValueOrDefault(good);
+            if (surplus <= 0) continue;
+
+            var exportQty = Math.Min(surplus, MaxExportPerGoodPerTick);
+            var revenue = exportQty * euroPrice;
+
+            economy.Supply[good] -= exportQty; // goods leave the simulation
+            port.Treasury += revenue;           // fresh gold from Europe
         }
     }
 }

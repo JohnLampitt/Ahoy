@@ -224,6 +224,7 @@ public sealed class SimulationEngine
                     if (_state.Player.PersonalGold >= cost && qty > 0)
                     {
                         _state.Player.PersonalGold -= cost;
+                        buyPort.Treasury += cost; // Group 10: port receives payment
                         buyPort.Economy.Supply[buy.Good] -= qty;
                         buyShip.Cargo[buy.Good] = buyShip.Cargo.GetValueOrDefault(buy.Good) + qty;
                         _emitter.Emit(new TradeCompleted(_state.Date, Core.Enums.SimulationLod.Local,
@@ -245,7 +246,17 @@ public sealed class SimulationEngine
 
                     if (qty > 0)
                     {
-                        _state.Player.PersonalGold += price * qty;
+                        // Group 10: port pays from treasury (zero-sum)
+                        var revenue = price * qty;
+                        if (sellPort.Treasury < revenue)
+                        {
+                            qty = Math.Max(1, sellPort.Treasury / price);
+                            revenue = price * qty;
+                        }
+                        if (revenue <= 0 || sellPort.Treasury <= 0) break;
+
+                        sellPort.Treasury -= revenue;
+                        _state.Player.PersonalGold += revenue;
                         sellShip.Cargo[sell.Good] -= qty;
                         if (sellShip.Cargo[sell.Good] <= 0) sellShip.Cargo.Remove(sell.Good);
                         sellPort.Economy.Supply[sell.Good] = sellPort.Economy.Supply.GetValueOrDefault(sell.Good) + qty;

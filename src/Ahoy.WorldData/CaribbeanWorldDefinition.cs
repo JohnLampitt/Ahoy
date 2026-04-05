@@ -279,6 +279,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
                 IsPirateHaven = pirateHaven,
             };
             port.AdjustPopulation(population - port.Population); // set to target
+            port.Treasury = population * 2; // starting treasury proportional to population
             state.Ports[id] = port;
             state.Regions[region].Ports.Add(id);
             if (faction.HasValue)
@@ -403,6 +404,10 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
             };
 
             ApplyArchetype(eco, archetype);
+
+            // Group 10: Export hubs can sell surplus goods to Europe (the gold faucet)
+            eco.CanExportToEurope = archetype is EconomicArchetype.TreasurePort
+                or EconomicArchetype.Entrepot;
 
             // Seed starting food supply: enough for ~30 days at current population
             var foodNeeded = Math.Max(1, port.Population / 100);
