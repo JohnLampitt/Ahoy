@@ -257,10 +257,25 @@ adjacent independent ports voluntarily merge. Individual defections produce
 more narrative variety: one port goes pirate, another stays independent,
 a third gets recaptured.
 
-### Q4: Governor retains gold and authority, with decay
+### Q4: Governor retains gold and authority — no artificial drain
 The governor keeps both — they're the same person, they just switched sides.
 Gold funds initial independent relief contracts. Authority determines
 governance stability (high = smooth transition, low = chaos → easy pirate
-prey). Add 0.5/tick authority drain for independent ports with no faction
-backing. When authority hits 0, the governor is powerless — pirates or any
-faction can walk in unopposed.
+prey).
+
+**Authority is condition-driven, not flag-driven.** Independent governors
+follow the same authority rules as faction governors:
+- Food supply met: authority stable or slowly growing (+0.1/tick)
+- Starvation: authority drops (-1/tick × starvation severity)
+- Blockaded: authority drops (-0.5/tick)
+- At authority 0: governor is powerless, port is vulnerable to takeover
+
+The real cost of independence is **not a magic drain** — it's the absence
+of faction support. No military reinforcements, no supply convoys (food
+imports at 50%), no faction treasury backing relief contracts. A competent
+governor who keeps food flowing and trade running can stay independent
+indefinitely. A governor who can't feed their people collapses — same as
+under any flag. The difference is they're doing it alone.
+
+This means the player's choice to support or undermine an independent port
+actually matters. Supply them and they thrive. Blockade them and they fall.
