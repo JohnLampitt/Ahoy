@@ -449,4 +449,26 @@ For distant regions, merchant ship movement is approximated: a ship on a multi-d
 
 ---
 
+## 8. Post-v0.1 Additions
+
+### Group 5A — Knowledge-Driven Merchant Routing (implemented)
+
+Merchant routing now unions `IndividualHolder` + `ShipHolder` facts and scores
+ports by expected trade margin (cargo → high sell prices, empty → low buy prices).
+`ShouldDepartPort` checks both holders. No system reads ground truth for NPC
+routing decisions. See `SDD-WeatherAndMovement` for routing details.
+
+### Group 7 — Epidemic Propagation (implemented)
+
+EconomySystem now ticks epidemic state:
+- 0.2% spawn chance per port per tick → sets `PortConditionFlags.Plague`
+- Docked ships gain `HasInfectedCrew` at 10%/tick
+- Infected ships spread epidemic to clean ports on dock (5%)
+- Epidemic ports: prosperity decays 2×, production halts
+- Natural clearing after 30 ticks, or immediately on Medicine delivery
+- `MerchantKnowledge` replaced by `KnowledgeStore` queries — merchants avoid
+  known epidemic/blockaded ports via `PortConditionClaim` routing (5A)
+
+---
+
 *Next step: FactionSystem — goals, relationships, and how factions act on the world each tick.*

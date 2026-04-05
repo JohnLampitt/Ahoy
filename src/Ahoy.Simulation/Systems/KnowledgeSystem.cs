@@ -81,6 +81,40 @@ public sealed class KnowledgeSystem : IWorldSystem
 
         // 6. 5C: Auto-resolve knowledge conflicts where spread > 0.40
         AutoResolveConflicts(state, context, events, tick);
+
+        // 7. Group 7: Seed PortConditionClaims for active crises
+        SeedPortConditionClaims(state, tick);
+    }
+
+    // ---- Group 7: Port condition knowledge seeding ----
+
+    private static void SeedPortConditionClaims(WorldState state, int tick)
+    {
+        foreach (var port in state.Ports.Values)
+        {
+            if (port.Conditions == PortConditionFlags.None) continue;
+
+            var claim = new PortConditionClaim(port.Id, port.Conditions);
+            var fact = new KnowledgeFact
+            {
+                Claim = claim,
+                Sensitivity = KnowledgeSensitivity.Public,
+                Confidence = 0.90f,
+                BaseConfidence = 0.90f,
+                ObservedDate = state.Date,
+                HopCount = 0,
+            };
+
+            // Seed into the port's own holder — propagates via arriving ships
+            var holder = new PortHolder(port.Id);
+            var existing = state.Knowledge.GetFacts(holder)
+                .Any(f => !f.IsSuperseded
+                    && f.Claim is PortConditionClaim pcc
+                    && pcc.Port == port.Id
+                    && pcc.Condition == port.Conditions);
+            if (!existing)
+                state.Knowledge.AddFact(holder, fact);
+        }
     }
 
     // ---- Event ingestion ----

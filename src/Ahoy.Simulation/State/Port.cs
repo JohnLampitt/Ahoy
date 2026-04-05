@@ -53,4 +53,7 @@ public sealed class Port
     public bool IsPirateHaven { get; set; }
     public bool IsNeutral { get; set; }
     public PortConditionFlags Conditions { get; set; } = PortConditionFlags.None;
+
+    /// <summary>Ticks remaining until epidemic clears naturally. Null = no active epidemic timer.</summary>
+    public int? EpidemicTicksRemaining { get; set; }
 }

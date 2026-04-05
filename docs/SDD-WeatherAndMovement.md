@@ -594,4 +594,43 @@ public float RouteProgressAccumulator { get; internal set; }  // fractional tick
 
 ---
 
-*All six tick pipeline systems are now designed. Next step: architecture review — how the systems wire together in the engine, project structure, and readiness assessment for implementation.*
+## 8. Post-v0.1 Additions
+
+### Group 5B — ShipRoute Union Type (implemented)
+
+`Ship.RoutingDestination` (PortId?) and `Ship.PoiDestination` (OceanPoiId?)
+replaced by a discriminated union:
+
+```csharp
+public abstract record ShipRoute;
+public record PortRoute(PortId Destination) : ShipRoute;
+public record PursuitRoute(ShipId Target, RegionId LastKnownRegion) : ShipRoute;
+public record PoiRoute(OceanPoiId Poi) : ShipRoute;
+```
+
+`TryDepartPort` and `ArriveInRegion` dispatch on route type. `PursuitRoute`
+docks at nearest port in target region for interception. NPC goal pursuit
+(EpistemicResolver) sets routes based on knowledge state.
+
+### Group 5A — Knowledge-Driven Routing (implemented)
+
+NPC merchant routing unions `IndividualHolder` + `ShipHolder` price facts.
+Scores ports by expected trade margin (cargo → high sell prices, empty → low
+buy prices). Falls back to highest-confidence known port, then HomePort.
+`ShouldDepartPort` checks both holders for actionable price knowledge.
+
+### Group 7 — Crisis-Aware Routing (implemented)
+
+Merchants avoid ports with known epidemic/blockade (via `PortConditionClaim`)
+and ports controlled by enemy factions (`Faction.AtWarWith`). Implemented in
+`GetKnownDangerousPorts` — organic quarantine and embargo emerge from the
+existing knowledge-gated routing without special quarantine logic.
+
+### Group 5E — RouteHazardClaim Seeding (implemented)
+
+`RouteHazardClaim` seeded into `ShipHolder` on `StormPropagated`,
+`PatrolEngaged`, and `ShipRaided` events. Propagates to port on next dock.
+
+---
+
+*All eight tick pipeline systems are now designed. Next step: architecture review — how the systems wire together in the engine, project structure, and readiness assessment for implementation.*

@@ -223,7 +223,60 @@ A good session ends with the player having been pulled sideways from their origi
 
 ---
 
-## 6. Explicit Scope Boundaries
+## 6. Emergent Narrative Architecture
+
+Stories in Ahoy are never scripted. They emerge from the collision of imperfect
+knowledge, personal grievances, and systemic crises.
+
+### The Knowledge-Driven World
+
+Every actor — player and NPC alike — operates on what they *know*, not what is
+objectively true. NPCs consult their personal knowledge (IndividualHolder) for
+routing, trading, and goal selection. Distant events arrive as fading rumours.
+Disinformation is first-class — factions plant lies, and NPCs can be tricked.
+
+### The EpistemicResolver
+
+"Quests" do not exist as authored objects. When an NPC hears about a bounty
+(ContractClaim enters their knowledge at sufficient confidence), the
+EpistemicResolver determines what they need to know and what action to take
+next. "Phases" emerge from knowledge gaps: hear rumour → investigate → verify →
+act. The same mechanism drives both player and NPC behaviour.
+
+### Dual-Origin Contract Pipeline
+
+Contracts — the actionable opportunities that drive gameplay — originate from
+two independent sources:
+- **Macro/Strategic:** Factions seed contracts from grand strategy (war,
+  famine, expansion, piracy suppression)
+- **Micro/Personal:** Individual NPCs seed contracts from personal grudges,
+  vendettas, and alliances via the Relationship Matrix
+
+Both output the same `ContractClaim` into the knowledge economy. The player
+discovers and pursues them uniformly without knowing their origin.
+
+### Systemic Crises
+
+Six major crisis types create the pressure events that fuel emergent narrative:
+1. **VIP Abduction** — captured governors trigger ransom demands and rescue bounties
+2. **Epidemic Outbreak** — disease spreads via ships, quarantines emerge organically
+   as merchants avoid infected ports
+3. **Chokehold Blockade** — hostile fleets starve ports, governors offer desperate bounties
+4. **Bloodless Coup** — defecting officials create assassination and arms-smuggling contracts
+5. **Intelligence Compromise** — captured secret documents fuel extortion and faction panic
+6. **Colonial War** — formal war declaration triggers mass Letters of Marque
+
+### Stall & Leak
+
+When an NPC fails to complete a goal (intel decays, funds run out, target
+escapes), their failure becomes the player's opportunity. The NPC's knowledge
+about the failed goal leaks into port gossip. The player hears "Captain Vane
+abandoned his hunt for the Silver Galleon near Jamaica" — and decides whether
+to pick up where Vane left off.
+
+---
+
+## 7. Explicit Scope Boundaries
 
 ### Out of Scope (for now)
 
@@ -256,13 +309,16 @@ Each region has **4–8 ports** of varying size and importance — major colonia
 
 ---
 
-## 7. Open Questions
+## 9. Open Questions
 
 These are unresolved design decisions to be revisited:
 
 - [ ] How many pirate brotherhoods at launch — one dominant brotherhood, or two to three with distinct regional territories and rivalries?
 - [ ] What does the player's starting ship look like — class, condition, crew size? Is it always the same, or varied?
-- [ ] Weather and natural events — hurricanes, storms, becalmed seas — in scope for the world sim, or deferred?
+- [x] Weather and natural events — implemented: WeatherSystem with storms, wind, propagation
+- [ ] Ship combat resolution — currently abstracted as stat checks; needs full design pass
+- [ ] ExtortGoal execution — demand/response cycle for NPC extortion (deferred)
+- [ ] LLM goal selection — INpcGoalSelector interface stubbed; implementation deferred until rule-based path proven
 
 ---
 

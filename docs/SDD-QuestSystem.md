@@ -102,7 +102,15 @@ public record FulfillContractGoal(
     Guid Id, IndividualId NpcId,
     ContractClaim Contract) : NpcGoal(Id, NpcId);
 
-// Future: TradeGoal, InvestigateGoal, FleeGoal, EscortGoal, etc.
+// Crisis goal types (Group 7):
+public record RansomGoal(Guid Id, IndividualId NpcId, IndividualId CaptiveId,
+    FactionId TargetFactionId, int DemandGold) : NpcGoal(Id, NpcId);
+public record ExtortGoal(Guid Id, IndividualId NpcId, IndividualId TargetId,
+    KnowledgeFactId LeverageFactId) : NpcGoal(Id, NpcId);
+public record PatrolRegionGoal(Guid Id, IndividualId NpcId,
+    RegionId Region) : NpcGoal(Id, NpcId);
+
+// Future: TradeGoal, InvestigateGoal, FleeGoal, etc.
 
 // ---- The Execution State Machine ----
 
