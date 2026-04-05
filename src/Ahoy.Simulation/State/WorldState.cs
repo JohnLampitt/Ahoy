@@ -28,6 +28,24 @@ public sealed class WorldState
     public Quests.QuestStore Quests  { get; } = new();
     public Dictionary<RegionId, RegionWeather> Weather { get; } = new();
 
+    // ---- Relationship matrix (6B) ----
+    /// <summary>
+    /// Sparse NPC-to-NPC (and NPC-to-Player) opinion matrix. Range: -100..+100.
+    /// Only populated for pairs that have interacted or received gossip about each other.
+    /// Key: (ObserverId, SubjectId). Asymmetric — A's opinion of B != B's opinion of A.
+    /// </summary>
+    public Dictionary<(IndividualId, IndividualId), float> RelationshipMatrix { get; } = new();
+
+    public float GetRelationship(IndividualId observer, IndividualId subject)
+        => RelationshipMatrix.TryGetValue((observer, subject), out var r) ? r : 0f;
+
+    public void AdjustRelationship(IndividualId observer, IndividualId subject, float delta)
+    {
+        var key = (observer, subject);
+        RelationshipMatrix.TryGetValue(key, out var current);
+        RelationshipMatrix[key] = Math.Clamp(current + delta, -100f, 100f);
+    }
+
     // ---- NPC goal pursuit (5B) ----
     /// <summary>
     /// Active NPC goal pursuits. Lives on WorldState so ShipMovementSystem (system 2)
