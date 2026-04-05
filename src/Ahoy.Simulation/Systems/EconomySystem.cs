@@ -45,6 +45,12 @@ public sealed class EconomySystem : IWorldSystem
             // Group 8: Calculate what this port needs based on population
             CalculateTargetSupply(port);
 
+            // External food imports — represents supply ships from Europe/mainland.
+            // The Caribbean historically couldn't feed itself; provisions arrived by sea.
+            // TODO(Group8): Replace with a proper inter-regional trade model. For now,
+            // ports receive a fixed food injection proportional to their faction's strength.
+            InjectExternalFood(port, state);
+
             // Group 8: Survival check — food consumption, starvation cascade
             TickSurvival(port, events, lod, state);
 
@@ -156,6 +162,30 @@ public sealed class EconomySystem : IWorldSystem
                     eco.BasePrice[good] = (int)(eco.BasePrice[good] * 0.6f);
             }
         }
+    }
+
+    // ---- External food imports ----
+
+    /// <summary>
+    /// Represents provisions arriving from outside the simulation (Europe, mainland Americas).
+    /// Every faction-controlled port receives a baseline food injection each tick. Larger
+    /// factions with more treasury can feed their ports better. Pirate havens get less.
+    /// TODO(Group8): Replace with proper inter-regional trade / convoy system.
+    /// </summary>
+    private static void InjectExternalFood(Port port, WorldState state)
+    {
+        if (port.ControllingFactionId is not { } factionId) return;
+        if (!state.Factions.TryGetValue(factionId, out var faction)) return;
+
+        // Base import: 5 food per 1000 population (covers ~50% of need)
+        // Adjusted by faction wealth: wealthy factions import more
+        var baseImport = port.Population / 150; // ~67% of food need from external sources
+        var wealthMultiplier = faction.TreasuryGold > 1000 ? 1.5f : 1.0f;
+        var pirateDiscount = port.IsPirateHaven ? 0.3f : 1.0f; // pirates get fewer supply ships
+
+        var foodImport = (int)(baseImport * wealthMultiplier * pirateDiscount);
+        if (foodImport > 0)
+            port.Economy.Supply[TradeGood.Food] = port.Economy.Supply.GetValueOrDefault(TradeGood.Food) + foodImport;
     }
 
     // ---- Group 8: Population-driven economy ----
@@ -308,28 +338,77 @@ public sealed class EconomySystem : IWorldSystem
             events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, sellQty, price, false), lod);
         }
 
-        // BUY goods the port produces that the ship has space for
+        // BUY goods using knowledge-driven arbitrage.
+        // The captain consults their knowledge of prices at other ports and buys
+        // goods that will sell at the highest markup. This is how food reaches
+        // starving ports: the captain knows food is 16× price there and buys it here.
         var cargoUsed = ship.Cargo.Values.Sum();
         var cargoFree = ship.MaxCargoTons - cargoUsed;
         if (cargoFree <= 0) return;
 
-        foreach (var (good, supply) in economy.Supply.ToList())
+        // Gather captain's knowledge of prices at other ports
+        KnowledgeHolderId agentHolder = ship.CaptainId.HasValue
+            ? new IndividualHolder(ship.CaptainId.Value)
+            : new ShipHolder(ship.Id);
+
+        var knownPricesElsewhere = state.Knowledge.GetFacts(agentHolder)
+            .Where(f => !f.IsSuperseded && f.Claim is PortPriceClaim pc && pc.Port != port.Id)
+            .Select(f => (Fact: f, Claim: (PortPriceClaim)f.Claim))
+            .ToList();
+
+        // Score each available good by: (best known sell price elsewhere - local buy price)
+        var opportunities = new List<(TradeGood Good, float Margin, int BuyPrice)>();
+        foreach (var (good, supply) in economy.Supply)
         {
             if (supply <= 0) continue;
+            var localPrice = economy.EffectivePrice(good);
+
+            // Find best known sell price for this good at another port
+            var bestSellPrice = knownPricesElsewhere
+                .Where(x => x.Claim.Good == good)
+                .Select(x => x.Claim.Price * x.Fact.Confidence)
+                .DefaultIfEmpty(0)
+                .Max();
+
+            if (bestSellPrice > localPrice)
+                opportunities.Add((good, bestSellPrice - localPrice, localPrice));
+        }
+
+        // Buy in order of best margin
+        foreach (var (good, margin, buyPrice) in opportunities.OrderByDescending(x => x.Margin))
+        {
             if (cargoFree <= 0) break;
+            var supply = economy.Supply.GetValueOrDefault(good);
+            if (supply <= 0) continue;
 
-            // Find a destination that demands this good (simple: just buy if profitable at any adjacent port)
-            var buyQty = Math.Min(Math.Min(supply, cargoFree), 50); // cap 50 tons
-            var price = economy.EffectivePrice(good);
-
-            if (ship.GoldOnBoard < price * buyQty) continue;
+            var buyQty = Math.Min(Math.Min(supply, cargoFree), 50);
+            if (ship.GoldOnBoard < buyPrice * buyQty) continue;
 
             economy.Supply[good] -= buyQty;
             ship.Cargo[good] = ship.Cargo.GetValueOrDefault(good) + buyQty;
-            ship.GoldOnBoard -= price * buyQty;
+            ship.GoldOnBoard -= buyPrice * buyQty;
             cargoFree -= buyQty;
 
-            events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, buyQty, price, true), lod);
+            events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, buyQty, buyPrice, true), lod);
+        }
+
+        // Fallback: if no arbitrage opportunities found, buy whatever's cheapest (exploration)
+        if (opportunities.Count == 0)
+        {
+            foreach (var (good, supply) in economy.Supply.OrderBy(kv => economy.EffectivePrice(kv.Key)))
+            {
+                if (supply <= 0 || cargoFree <= 0) continue;
+                var price = economy.EffectivePrice(good);
+                var buyQty = Math.Min(Math.Min(supply, cargoFree), 50);
+                if (ship.GoldOnBoard < price * buyQty) continue;
+
+                economy.Supply[good] -= buyQty;
+                ship.Cargo[good] = ship.Cargo.GetValueOrDefault(good) + buyQty;
+                ship.GoldOnBoard -= price * buyQty;
+                cargoFree -= buyQty;
+
+                events.Emit(new TradeCompleted(state.Date, lod, ship.Id, port.Id, good, buyQty, price, true), lod);
+            }
         }
     }
 }

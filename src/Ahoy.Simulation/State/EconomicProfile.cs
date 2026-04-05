@@ -55,9 +55,11 @@ public sealed class EconomicProfile
         foreach (var mod in ActiveModifiers)
             if (mod.Good == good) multiplier *= mod.Multiplier;
 
-        // Wider band for essentials (10%–5000%) vs luxuries (20%–500%)
+        // Wider band for essentials (10%–1000%) vs luxuries (20%–500%)
+        // Cap at 10× not 50× — higher creates gold hyperinflation since ports
+        // don't have explicit treasuries (gold is created from trade volume).
         var minMult = IsEssential(good) ? 0.10f : 0.20f;
-        var maxMult = IsEssential(good) ? 50.0f : 5.0f;
+        var maxMult = IsEssential(good) ? 10.0f : 5.0f;
         return (int)Math.Clamp(basePrice * multiplier, basePrice * minMult, basePrice * maxMult);
     }
 }

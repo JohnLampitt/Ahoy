@@ -121,6 +121,10 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
             if (individual.LocationPortId is not { } portId) continue;
             if (!state.Ports.TryGetValue(portId, out var port)) continue;
 
+            // Group 8: Famine — seed faction-backed food relief contracts
+            if (port.Conditions.HasFlag(PortConditionFlags.Famine))
+                SeedFamineRelief(individual, port, state);
+
             // Crisis 2: Epidemic — seed Medicine and Food delivery contracts
             if (port.Conditions.HasFlag(PortConditionFlags.Plague))
                 SeedEpidemicContracts(individual, port, state);
@@ -135,6 +139,55 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
                 && faction.AtWarWith.Count > 0)
                 SeedLettersOfMarque(individual, faction, state);
         }
+    }
+
+    /// <summary>
+    /// Group 8 Phase 3: Faction-backed famine relief. When a port is starving and
+    /// can't afford food at current prices, the parent faction backs a GoodsDelivered
+    /// contract from its central treasury. This breaks the treasury deadlock.
+    /// </summary>
+    private void SeedFamineRelief(Individual governor, Port port, WorldState state)
+    {
+        var targetKey = $"Port:{port.Id.Value}:Food";
+        if (state.Quests.IsOnCooldown(targetKey, state.Date)) return;
+        if (governor.FactionId is not { } factionId) return;
+        if (!state.Factions.TryGetValue(factionId, out var faction)) return;
+
+        // Calculate relief budget: faction pays, not the port
+        var foodPrice = port.Economy.EffectivePrice(TradeGood.Food);
+        var reliefReward = Math.Max(200, foodPrice * 20); // enough to cover 20 units at crisis prices
+        reliefReward = Math.Min(reliefReward, faction.TreasuryGold / 2); // don't bankrupt the faction
+        if (reliefReward < 100) return; // faction is broke too
+
+        faction.TreasuryGold -= reliefReward;
+
+        var contract = new ContractClaim(
+            IssuerId: governor.Id,
+            IssuerFactionId: factionId,
+            TargetSubjectKey: targetKey,
+            Condition: ContractConditionType.GoodsDelivered,
+            GoldReward: reliefReward,
+            Archetype: NarrativeArchetype.DesperatePlea);
+
+        // Supersede existing contract for same target
+        var portHolder = new PortHolder(port.Id);
+        var existing = state.Knowledge.GetFacts(portHolder)
+            .FirstOrDefault(f => !f.IsSuperseded && f.Claim is ContractClaim cc
+                && cc.TargetSubjectKey == targetKey);
+        if (existing is not null)
+            state.Knowledge.MarkSuperseded(portHolder, existing, 0);
+
+        var fact = new KnowledgeFact
+        {
+            Claim = contract,
+            Sensitivity = KnowledgeSensitivity.Public, // desperate — broadcast widely
+            Confidence = 0.90f,
+            BaseConfidence = 0.90f,
+            ObservedDate = state.Date,
+            SourceHolder = new FactionHolder(factionId),
+        };
+        state.Knowledge.AddFact(portHolder, fact);
+        state.Quests.RecordCooldown(targetKey, state.Date.Advance(10));
     }
 
     private void SeedEpidemicContracts(Individual governor, Port port, WorldState state)
