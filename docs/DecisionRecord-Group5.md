@@ -1,13 +1,84 @@
 # Decision Record — Group 5 (Knowledge-Driven Living World)
 
-Date: 2026-04-04
-Status: Approved for implementation (post competing-LLM review)
+Date: 2026-04-04 (initial review), 2026-04-05 (architectural pivot)
+Status: Revised — EpistemicResolver architecture adopted, 5D dropped
 
-## Review Summary
+## Architectural Pivot (2026-04-05)
+
+After the competing LLM review, further discussion revealed a critical lesson
+from the project's own history: **quest templates were already tried and
+deliberately removed.** The surviving `ContractQuestInstance` is the
+stripped-down replacement that actually works — knowledge-triggered, no
+predefined structure.
+
+This validates the competing LLM's concerns about 5D more strongly than
+initially credited. Building multi-phase quest templates would repeat a
+known failure.
+
+### What changed
+
+| Area | Before | After |
+|---|---|---|
+| 5D (Multi-Phase Quests) | Phase graph on QuestTemplate | **Dropped entirely** — templates were tested and rejected in practice |
+| Quest architecture | Template-driven state machines | **EpistemicResolver** — phases emerge from knowledge gaps, not predefined structures |
+| NPC goal model | NpcContractPursuit (contract-only) | **NpcGoal hierarchy** — generalised goal pursuit for any knowledge-driven objective |
+| NPC failure | Silent expiry | **Stall & Leak** — NPC failure/stalling creates player opportunity through leaked intel |
+| LLM role | Narrative flavour on quest text | **Goal selection** — LLM chooses NPC goals (the "why"), EpistemicResolver executes deterministically (the "how"), simulation validates outcomes (the "what happened") |
+
+### EpistemicResolver — Core Concept
+
+The player's "quest" is already how ContractQuestInstance works:
+1. Hear a rumour (low confidence fact enters holder)
+2. Investigate to verify (raise confidence through investigation commands)
+3. Act on verified intelligence (fulfil contract condition)
+
+The EpistemicResolver generalises this pattern for both NPCs and players.
+There are no predefined phases — the knowledge system's confidence thresholds
+*are* the phase gates. A fact at 0.30 confidence is a rumour. At 0.60 it's
+actionable intelligence. At 0.80 it's verified. The "phases" emerge from
+the epistemic state, not from a template.
+
+### NpcGoal Hierarchy — Core Concept
+
+Replaces the contract-only `NpcContractPursuit` with a general goal model.
+An NPC goal is any knowledge-driven objective: pursue a bounty, investigate
+a rumour, trade at a profitable port, flee a dangerous region. Goals are
+lightweight routing directives with resolution conditions — same footprint
+as `NpcContractPursuit` but not limited to contracts.
+
+### Stall & Leak — Core Concept
+
+When an NPC stalls on a goal (intel decays, route blocked, target lost),
+instead of silent expiry, the stall generates observable side effects:
+the NPC's knowledge about why they stalled leaks into port gossip on next
+dock. This creates player opportunity — "Captain Vane abandoned his hunt
+for the Silver Galleon near Jamaica" is actionable intelligence.
+
+### LLM Invariant — Clarified
+
+The constraint is not "LLM never affects gameplay." It is **"simulation
+never depends on LLM."** The DecisionQueue pattern already embodies this.
+
+- **Without LLM:** Rule-based goal selection. Deterministic,
+  personality-weighted scoring. Every NPC gets a sensible goal every tick.
+  The world is alive but predictable — NPCs behave rationally given their
+  knowledge and role.
+- **With LLM:** Goal selection gains nuance. A pirate captain considers
+  personal grudges, weighs risk against personality, maybe pursues a vendetta
+  instead of the highest-value bounty. NPCs become characters rather than
+  optimisers. The world is alive and surprising.
+
+The line: **LLM selects goals (the "why"). EpistemicResolver executes them
+deterministically (the "how"). Simulation validates outcomes mechanically
+(the "what happened").** The LLM can influence what an NPC *wants* to do.
+It never influences what *actually happens* when they try.
+
+---
+
+## Original Review Summary (2026-04-04)
 
 Competing LLM rated: 5A Revise, 5B Revise, 5C Solid, 5D Solid, 5E Solid.
-All sub-proposals survive review. Two revisions adopted with modifications,
-three solid ratings confirmed. No fundamental rethinks required.
+5A, 5B (revised), 5C, and 5E survive. 5D dropped per architectural pivot above.
 
 ---
 
@@ -46,66 +117,63 @@ Revisit only if profiler shows RuleBasedDecisionProvider exceeding 2-3ms/tick.
 
 ---
 
-## 5B — NPC Quest Participation (REVISE → Adopted with modifications)
+## 5B — NPC Quest Participation (REVISE → Revised with NpcGoal architecture)
 
-### NpcContractPursuit on WorldState — **Adopt**
+### NpcContractPursuit → NpcGoal hierarchy
 
-The competing LLM correctly identifies the tick-ordering problem: if
-`NpcContractPursuit` lives only in QuestSystem (system 8), ShipMovementSystem
-(system 2) can't route based on it. Move to WorldState:
+The original proposal used a contract-specific `NpcContractPursuit`. The
+architectural pivot replaces this with a general **NpcGoal hierarchy** that
+handles any knowledge-driven objective (bounties, trade routing, investigation,
+fleeing danger). Same lightweight footprint — a routing directive with a
+resolution condition — but not limited to contracts.
+
+Lives on WorldState for cross-system visibility (same tick-ordering rationale
+as the original proposal):
 
 ```csharp
 // WorldState.cs
-public Dictionary<IndividualId, NpcContractPursuit> NpcContractPursuits { get; } = new();
+public Dictionary<IndividualId, NpcGoal> NpcGoals { get; } = new();
 ```
 
-QuestSystem writes pursuits. ShipMovementSystem reads them to set routing.
+### Stall & Leak mechanic — **New addition**
 
-### ContractFailed event — **Adopt with modification**
+When an NPC stalls on a goal (intel confidence decays below threshold, route
+blocked, target lost), instead of silent expiry:
+1. Goal status transitions to Stalled
+2. On next dock, the NPC's knowledge about the stalled goal leaks into port
+   gossip (ShipHolder → PortHolder propagation)
+3. This creates player opportunity: "Captain Vane abandoned his hunt for the
+   Silver Galleon near Jamaica" is actionable intelligence
 
-Add `NpcClaimedContract` event (not `ContractFailed` — the contract didn't fail,
-it succeeded for someone else). The event carries the NPC's identity so the
-console can surface: "Captain Vane claimed the bounty on the Silver Galleon."
+This is the bridge between NPC failure and player discovery.
 
-### OQ3 — No player compensation: **Adopt**
+### NpcClaimedContract event — **Adopt** (unchanged)
 
-"You were too slow" is the correct experience. The world does not wait. Clear
-communication via `NpcClaimedContract` event and `QuestResolved` with status
-`ClaimedByNpc` ensures the player understands what happened.
+When an NPC successfully resolves a contract goal, emit `NpcClaimedContract`
+event. Player's quest expires with status `ClaimedByNpc`.
 
-### OQ4 — PursuitRoute variant: **Adopt with modification**
+### OQ3 — No player compensation: **Adopt** (unchanged)
 
-New ShipLocation variant is overkill — `ShipLocation` is a position union
-(where you *are*), not a routing intent. The correct place is a new
-`RoutingDestination` alternative. Currently `Ship.RoutingDestination` is
-`PortId?` — too narrow. Refactor to:
+"You were too slow" is the correct experience.
+
+### OQ4 — ShipRoute union type: **Adopt** (unchanged)
 
 ```csharp
-// Replace: public PortId? RoutingDestination { get; set; }
-// With:
 public abstract record ShipRoute;
 public record PortRoute(PortId Destination) : ShipRoute;
 public record PursuitRoute(ShipId Target, RegionId LastKnownRegion) : ShipRoute;
-public record PoiRoute(OceanPoiId Poi) : ShipRoute;  // consolidates existing PoiDestination
+public record PoiRoute(OceanPoiId Poi) : ShipRoute;
 
-public ShipRoute? Route { get; set; }
+public ShipRoute? Route { get; set; }  // replaces RoutingDestination + PoiDestination
 ```
 
-This also lets us retire `PoiDestination` as a separate field. ShipMovementSystem
-handles `PursuitRoute` by navigating to `LastKnownRegion` and performing a
-proximity check on arrival.
+Now also used by the NpcGoal system — a goal determines the ship's Route.
 
-### OQ5 — Eligible roles: **Adopt with modification**
+### OQ5 — Eligible roles: **Adopt with modification** (unchanged)
 
-Agree: PirateCaptain, NavalOfficer, Privateer + Informant.
-
-**Informant detail:** Informants are eligible for `TargetDead` contracts only.
-Resolution is an abstracted stat-check when the Informant arrives at the target's
-port (assassination/sabotage), not naval combat. This is gated by
-`IntelligenceCapability` of the Informant's faction — higher capability = higher
-success chance. Failure emits `AgentBurned` for the Informant.
-
-Smugglers and PortMerchants excluded — economically motivated, combat-averse.
+PirateCaptain, NavalOfficer, Privateer + Informant (TargetDead only).
+Informant resolution gated by IntelligenceCapability. Smugglers and
+PortMerchants excluded.
 
 ---
 
@@ -140,34 +208,20 @@ knowledge and meta-knowledge about contradictions.
 
 ---
 
-## 5D — Multi-Phase Quest Framework (SOLID → Confirmed)
+## 5D — Multi-Phase Quest Framework (DROPPED)
 
-### CurrentPhaseIndex — **Adopt**
+**Dropped in architectural pivot (2026-04-05).** Quest templates were already
+tried in the codebase and deliberately removed. The surviving
+`ContractQuestInstance` — knowledge-triggered, no predefined structure — is the
+approach that actually works.
 
-Add `int CurrentPhaseIndex { get; set; }` to quest instance model. Obvious
-omission from the original proposal.
+The EpistemicResolver replaces this entirely. "Phases" emerge from knowledge
+confidence thresholds, not from a template state machine. See the Architectural
+Pivot section above for the full rationale.
 
-### OQ8 — Pin trigger facts: **Adopt with modification**
-
-Agree that re-acquisition is frustrating gameplay. Pin trigger facts by setting
-`IsDecayExempt = true` when the quest activates. Revert on quest completion,
-failure, or expiry.
-
-**Modification:** Only pin facts that are directly referenced as phase gate
-conditions (trigger facts and phase-specific knowledge gates). Don't pin all
-related facts — if the player hears a *secondary* rumour about the treasure
-site, that rumour should still decay normally. The captain's log records the
-quest-critical details, not every overheard whisper.
-
-### OQ9 — Defer NPC multi-phase quests: **Adopt**
-
-Add `bool IsNpcEligible` to `QuestTemplate` (default `false` for multi-phase,
-`true` for flat contracts). Autonomous phase navigation requires GOAP or HTN,
-which is a fundamentally different NPC architecture. Defer until
-`RuleBasedDecisionProvider` is proven insufficient for the game's needs.
-
-**Deferral condition:** Revisit when > 50% of contract quests are being
-completed by NPCs and the simulation needs richer NPC-driven narrative beats.
+OQ8 (fact pinning) and OQ9 (NPC multi-phase eligibility) are moot — there are
+no phases to pin facts to, and NPC goal pursuit is handled by the NpcGoal
+hierarchy instead of template-gated participation.
 
 ---
 
@@ -200,12 +254,15 @@ as a baseline — they're structurally leaky regardless of events.
 | Item | Source | Action |
 |---|---|---|
 | PortLocationClaim | Competing LLM | **Rejected** — geography is structural, not epistemic |
-| NpcContractPursuit on WorldState | Competing LLM | **Adopted** — tick ordering requires it |
+| NpcGoal on WorldState | Pivot (was NpcContractPursuit) | **Adopted** — generalised goal hierarchy, tick ordering requires WorldState |
 | ShipRoute union type | Integration | **Adopted** — replaces PortId? RoutingDestination + PoiDestination |
 | NpcClaimedContract event | Integration | **Adopted** — player communication for lost bounties |
+| Stall & Leak mechanic | Pivot | **Adopted** — NPC stalls leak intel into port gossip, creates player opportunity |
+| EpistemicResolver | Pivot | **Adopted** — unified quest architecture, replaces template state machines |
+| LLM goal selection invariant | Pivot | **Adopted** — LLM selects goals, never determines outcomes |
 | KnowledgeConflictResolved event | Competing LLM | **Adopted** — UI cleanup signal |
 | ConflictCondition variant | Competing LLM | **Adopted** — clean quest trigger for conflicts |
-| CurrentPhaseIndex on quest instance | Competing LLM | **Adopted** — obvious model gap |
-| IsNpcEligible on QuestTemplate | Competing LLM | **Adopted** — gates NPC quest participation |
+| ~~CurrentPhaseIndex on quest instance~~ | ~~Competing LLM~~ | **Moot** — 5D dropped |
+| ~~IsNpcEligible on QuestTemplate~~ | ~~Competing LLM~~ | **Moot** — 5D dropped, NpcGoal handles eligibility |
 | Informant assassination mechanic | Integration | **Adopted** — non-naval contract resolution path |
 | Event-driven leak triggers | Competing LLM | **Adopted** — replaces flat RNG for high-cap factions |

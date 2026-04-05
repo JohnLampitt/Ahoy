@@ -1,6 +1,6 @@
 # Implementation Plan — Knowledge-Driven Living World
 
-Date: 2026-04-04
+Date: 2026-04-04 (initial), 2026-04-05 (revised — EpistemicResolver pivot)
 
 ## Motivation
 
@@ -9,6 +9,27 @@ The GDD states two foundational pillars: "The world is alive" and "Information i
 But the world is not yet alive in the way the GDD demands. The critical gap: **NPCs are epistemic spectators, not epistemic agents.** They hold knowledge but don't act on it. Only the player navigates uncertainty; NPCs read ground truth. Quests are player-only; no NPC pursues a bounty, investigates a rumour, or acts on bad intelligence. The knowledge system is a one-way mirror.
 
 This plan addresses the structural gaps that prevent a living, breathing world where both player and NPCs participate in knowledge-driven emergent gameplay.
+
+## Architectural Pivot — Why Templates Are Dead
+
+Quest templates (predefined phase graphs with state machines) were **already
+tried in this codebase and deliberately removed.** The surviving
+`ContractQuestInstance` is the stripped-down replacement that actually works:
+knowledge-triggered, no predefined structure.
+
+The new architecture uses an **EpistemicResolver** — a unified model where
+"phases" emerge from knowledge confidence thresholds, not template definitions.
+A fact at 0.30 is a rumour. At 0.60 it's actionable. At 0.80 it's verified.
+The player's journey through a "quest" is simply: hear rumour → investigate →
+act. This is already how `ContractQuestInstance` works; the resolver generalises
+it for both NPCs and players.
+
+**LLM Invariant:** The simulation never depends on the LLM. The LLM selects
+NPC goals (the "why" — adding personality, grudges, risk assessment). The
+EpistemicResolver executes goals deterministically (the "how"). The simulation
+validates outcomes mechanically (the "what happened"). Without the LLM,
+rule-based scoring produces valid goals. With it, NPCs become characters rather
+than optimisers.
 
 ---
 
@@ -38,13 +59,15 @@ This plan addresses the structural gaps that prevent a living, breathing world w
 
 **Impact:** Disinformation creates conflicts that silently resolve via confidence decay rather than creating meaningful gameplay moments.
 
-### G4 — Flat Quest State Machine (Medium)
+### G4 — Flat Quest State Machine (Medium — resolved by EpistemicResolver, not templates)
 
-**Current state:** Quests are `Active -> Completed | Expired | Failed`. No phases. SDD-QuestSystem §7.3 explicitly defers multi-phase quests ("not implemented in v0.1").
+**Current state:** Quests are `Active -> Completed | Expired | Failed`. No phases.
 
-**Problem:** "Expansive quests" require investigation phases, information gathering, intermediary contacts, and branching mid-quest based on what the player learns. A treasure hunt needs: hear rumour -> verify location -> navigate hazards -> discover site. A political conspiracy needs: receive tip -> investigate -> choose allegiance -> act.
+**Problem:** "Expansive quests" require investigation phases, information gathering, intermediary contacts, and branching mid-quest based on what the player learns.
 
-**Impact:** Quests feel transactional rather than adventurous.
+**Resolution:** Templates were tried and removed. The EpistemicResolver approach recognises that the knowledge system's confidence thresholds *already are* the phase gates. A treasure hunt is: hear rumour (0.35 confidence) → investigate (0.65) → sail there (direct observation, 0.95). No predefined phase graph needed — the existing mechanics of propagation, investigation, decay, and corroboration create the quest structure emergently.
+
+**Impact:** Quests gain depth without adding a template system. The same epistemic model applies to both player quests and NPC goals.
 
 ### G5 — Claim Type Gaps (Medium)
 
@@ -101,45 +124,43 @@ Replace flat 2% tour probability:
 
 Pass `KnowledgeStore` into decision evaluation so all NPC decision triggers can read holder-specific facts rather than world state. This is the infrastructure change; individual decision rules are updated incrementally.
 
-### Group 5B — NPC Quest Participation
+### Group 5B — NPC Goal Pursuit (revised from "NPC Quest Participation")
 
-**Goal:** NPCs can detect, pursue, and resolve contract quests through the same knowledge-triggered mechanism as the player.
+**Goal:** NPCs detect, pursue, and resolve knowledge-driven goals through the
+same epistemic mechanisms as the player. Not limited to contracts — any
+knowledge-driven objective (bounties, trade, investigation, flight).
 
-#### 5B-1: NPC Contract Detection
+#### 5B-1: NpcGoal Hierarchy
 
-**File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
-
-New method `ScanForNpcContractOpportunities(WorldState)`:
-- For each alive Individual with role in {PirateCaptain, NavalOfficer, Privateer, Informant}:
-  - Read their `IndividualHolder` for `ContractClaim` facts with confidence > 0.40
-  - Check supporting intel (same gate as player: separate fact about TargetSubjectKey)
-  - Informants eligible only for `TargetDead` contracts (assassination/sabotage, not naval combat)
-  - If conditions met: create `NpcContractPursuit` on `WorldState.NpcContractPursuits`
-
-#### 5B-2: NPC Contract Pursuit Model
-
-**File:** `src/Ahoy.Simulation/State/QuestModels.cs`
+**File:** `src/Ahoy.Simulation/State/NpcGoal.cs` (new)
 
 ```csharp
-public sealed class NpcContractPursuit
+public abstract record NpcGoal
 {
     public required IndividualId PursuerId { get; init; }
-    public required ContractClaim Contract { get; init; }
-    public NpcPursuitStatus Status { get; set; }  // Routing | Engaging | Abandoned
+    public NpcGoalStatus Status { get; set; }  // Pursuing | Stalled | Completed | Abandoned
     public required int ActivatedOnTick { get; init; }
 }
+
+public enum NpcGoalStatus { Pursuing, Stalled, Completed, Abandoned }
+
+// Contract pursuit (bounty hunting, assassination)
+public record ContractGoal(ContractClaim Contract) : NpcGoal;
+
+// Trade pursuit (route to known profitable port)
+// Future: investigation, fleeing, escort, etc.
 ```
 
 **File:** `src/Ahoy.Simulation/State/WorldState.cs`
 
 ```csharp
-public Dictionary<IndividualId, NpcContractPursuit> NpcContractPursuits { get; } = new();
+public Dictionary<IndividualId, NpcGoal> NpcGoals { get; } = new();
 ```
 
-Lives on WorldState so ShipMovementSystem (system 2) can read pursuits when
-setting NPC routes, even though QuestSystem (system 8) creates them.
+Lives on WorldState so ShipMovementSystem (system 2) can read goals when
+setting NPC routes, even though QuestSystem (system 7) creates them.
 
-#### 5B-3: ShipRoute Union Type
+#### 5B-2: ShipRoute Union Type
 
 **File:** `src/Ahoy.Simulation/State/Ship.cs`
 
@@ -157,22 +178,48 @@ public ShipRoute? Route { get; set; }  // replaces RoutingDestination + PoiDesti
 ```
 
 `PursuitRoute` navigates to `LastKnownRegion` and performs proximity check
-on arrival for interception. Standard port routing would miss targets at sea.
+on arrival for interception. NpcGoal determines which Route variant to set.
 
-#### 5B-4: NPC Contract Resolution
+#### 5B-3: NPC Goal Detection
 
 **File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
 
-Each tick, for active `NpcContractPursuit`:
+New method `ScanForNpcGoals(WorldState)`:
+- For each alive Individual with role in {PirateCaptain, NavalOfficer, Privateer, Informant}:
+  - Read their `IndividualHolder` for `ContractClaim` facts with confidence > 0.40
+  - Check supporting intel (same gate as player: separate fact about TargetSubjectKey)
+  - Informants eligible only for `TargetDead` contracts (assassination/sabotage)
+  - If conditions met: create `ContractGoal` on `WorldState.NpcGoals`
+- Rule-based goal selection by default; LLM can override via DecisionQueue
+  (adds personality-weighted judgement without changing the execution path)
+
+#### 5B-4: NPC Goal Resolution & Stall/Leak
+
+**File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
+
+Each tick, for active `NpcGoal`:
 - If pursuer's ship is in same region as target: attempt resolution (stat check)
 - Informant `TargetDead` resolution: abstracted stat-check gated by faction's
   `IntelligenceCapability` on arrival at target's port. Failure emits `AgentBurned`.
-- If pursuer's intel confidence drops below 0.30: status -> Abandoned
-- If target destroyed/dead: emit `NpcClaimedContract` event, pay NPC
+- If pursuer's intel confidence drops below 0.30: status -> **Stalled**
+- If target destroyed/dead by NPC: emit `NpcClaimedContract` event, pay NPC
 - Player receives no compensation — "you were too slow" is intentional
-- Emit `NpcContractPursuitStarted` / `NpcContractAbandoned` as WorldEvents so the knowledge system can propagate "Captain X is hunting Ship Y" as gossip
 
-**Player interaction:** The player competes with NPCs for bounties. If an NPC fulfils a contract first, the player's quest expires with status `ClaimedByNpc`. The player can also sell intel to NPCs to point them at targets (or misdirect them with bad intel).
+**Stall & Leak mechanic:** When a goal transitions to Stalled:
+1. NPC continues normal behaviour (falls back to trade routing or HomePort)
+2. On next dock, the stalled goal's context leaks into port gossip via
+   ShipHolder → PortHolder propagation
+3. Observable side effects: "Captain Vane abandoned his hunt for the Silver
+   Galleon near Jamaica" enters the port's knowledge pool
+4. Player (or other NPCs) can discover and act on this leaked intelligence
+
+This is the bridge between NPC failure and player opportunity. Silent expiry
+is replaced with emergent storytelling.
+
+**Player interaction:** The player competes with NPCs for bounties. If an NPC
+fulfils a contract first, the player's quest expires with status `ClaimedByNpc`.
+The player can also sell intel to NPCs to point them at targets (or misdirect
+them with bad intel).
 
 ### Group 5C — Knowledge Conflict Resolution
 
@@ -228,63 +275,37 @@ New quest templates that trigger on conflicts:
 - "Two captains disagree about the location of the Silver Fleet — who do you believe?"
 - "Your intelligence contradicts the governor's briefing — investigate or comply?"
 
-### Group 5D — Multi-Phase Quest Framework
+### ~~Group 5D — Multi-Phase Quest Framework~~ (DROPPED)
 
-**Goal:** Replace flat state machine with a phase graph for complex quests.
+**Dropped.** Quest templates were already tried in this codebase and deliberately
+removed. The surviving `ContractQuestInstance` — knowledge-triggered, no
+predefined structure — is the approach that works.
 
-#### 5D-1: QuestPhase Model
+**Replacement: EpistemicResolver.** The "phases" that templates tried to
+predefine emerge naturally from knowledge confidence thresholds:
 
-**File:** `src/Ahoy.Simulation/State/QuestModels.cs`
+| Confidence | Epistemic State | Player Experience |
+|---|---|---|
+| < 0.30 | Noise | Not actionable — below awareness threshold |
+| 0.30–0.50 | Rumour | "You've heard whispers…" — investigation available |
+| 0.50–0.70 | Actionable intel | Quest activation threshold — can act, but risk of bad info |
+| 0.70–0.90 | Verified intelligence | High confidence — reliable basis for action |
+| > 0.90 | Direct observation | Ground truth equivalent — player witnessed it |
 
-```
-QuestPhase:
-  PhaseId: string
-  Description: string
-  KnowledgeGate: QuestCondition (must be satisfied to advance)
-  LocationGate: Func<WorldState, bool>? (optional physical presence requirement)
-  Branches: IReadOnlyList<QuestBranch> (choices available in this phase)
-  AutoAdvance: bool (advances immediately when gate satisfied, no player choice)
-```
+A "treasure hunt" is not Phase 1 → Phase 2 → Phase 3. It is:
+1. `OceanPoiClaim` enters PlayerHolder at 0.35 confidence (rumour heard in tavern)
+2. Player investigates → confidence rises to 0.65 (corroborated by second source)
+3. Player sails to region → direct observation → confidence 0.95
 
-QuestTemplate gains `Phases: IReadOnlyList<QuestPhase>` (ordered). Existing flat templates map to a single phase (backward compatible).
+No template defined these steps. The knowledge system's existing mechanics
+(propagation, investigation, decay, corroboration) *are* the quest structure.
+The LLM narrative layer describes what's happening; it doesn't drive it.
 
-Quest instance gains `int CurrentPhaseIndex { get; set; }` to track progress.
-
-**Trigger fact pinning:** When a multi-phase quest activates, set
-`IsDecayExempt = true` on facts directly referenced as phase gate conditions.
-Revert on quest completion/failure/expiry. Only pin gate-critical facts, not
-every related fact — the captain's log records quest details, not every whisper.
-
-**NPC eligibility:** Add `bool IsNpcEligible` to `QuestTemplate` (default
-`false` for multi-phase, `true` for flat contracts). Autonomous phase navigation
-requires GOAP/HTN architecture; defer until RuleBasedDecisionProvider proves
-insufficient.
-
-#### 5D-2: Phase Advancement Logic
-
-**File:** `src/Ahoy.Simulation/Systems/QuestSystem.cs`
-
-Each tick for active multi-phase quests:
-1. Evaluate current phase's `KnowledgeGate` against player facts
-2. If satisfied and `AutoAdvance`: move to next phase, emit `QuestPhaseAdvanced`
-3. If satisfied and not `AutoAdvance`: present branches to player
-4. If final phase completed: resolve quest normally
-
-#### 5D-3: Exemplar Multi-Phase Templates
-
-**File:** `src/Ahoy.WorldData/CaribbeanQuestTemplates.cs`
-
-Two new templates exercising the phase system:
-
-**"The Lost Manifest"** (treasure hunt):
-- Phase 1 (Rumour): Trigger on `OceanPoiClaim` with confidence < 0.50. Auto-advance.
-- Phase 2 (Verify): Requires `OceanPoiClaim` confidence > 0.70 (player must investigate/corroborate). Choice: pursue alone or sell location.
-- Phase 3 (Expedition): Location gate — player ship in POI region. Choice: salvage or set ambush for rivals.
-
-**"The Governor's Conspiracy"** (political):
-- Phase 1 (Tip): Trigger on `IndividualAllegianceClaim` showing infiltrator. Auto-advance.
-- Phase 2 (Gather Evidence): Requires 2+ corroborating facts about the individual. Choice: confront governor, sell to rival faction, or blackmail.
-- Phase 3 (Consequences): Knowledge gate on faction response. Resolution branches vary by Phase 2 choice.
+The same model applies to NPCs via the NpcGoal hierarchy (5B). An NPC
+"pursuing a treasure" is an NPC whose IndividualHolder contains an
+`OceanPoiClaim` at actionable confidence, whose NpcGoal routes them toward
+the POI region. If their confidence decays, the goal stalls. No phase graph
+needed.
 
 ### Group 5E — Claim Circulation Improvements
 
@@ -339,17 +360,14 @@ Group 5A (NPC knowledge-gated decisions)
 Group 5E (claim circulation — makes 5A meaningful by giving NPCs facts to act on)
   All items independent, parallel
   ↓
-Group 5B (NPC quest participation — needs 5A for NPC routing + 5E for claim flow)
-  5B-2 + 5B-3 first (models), then 5B-1 + 5B-4
+Group 5B (NPC goal pursuit — needs 5A for NPC routing + 5E for claim flow)
+  5B-1 + 5B-2 first (NpcGoal model + ShipRoute union), then 5B-3 + 5B-4
   ↓
 Group 5C (conflict resolution — benefits from all above being live)
   5C-1 first (player-facing), then 5C-2, then 5C-3 + 5C-4
-  ↓
-Group 5D (multi-phase quests — independent of 5B/5C but richer with them)
-  5D-1 first (model), then 5D-2, then 5D-3
 ```
 
-Groups 5C and 5D are independent of each other and can proceed in parallel once 5A+5E are stable.
+5D is dropped. Groups 5C can proceed once 5A+5E are stable.
 
 ---
 
@@ -357,14 +375,16 @@ Groups 5C and 5D are independent of each other and can proceed in parallel once 
 
 1. **No system reads ground truth for NPC decisions after 5A.** All NPC behaviour flows from held facts. This is the single most important invariant.
 
-2. **NPC quest pursuit is lightweight.** `NpcContractPursuit` is not a full `QuestInstance` — it has no branches, no LLM dialogue, no player-facing UI. It's a routing directive with a resolution condition. Lives on WorldState for cross-system visibility.
+2. **NPC goal pursuit is lightweight.** `NpcGoal` is not a full `QuestInstance` — it has no branches, no predefined phases, no player-facing UI. It's a routing directive with a resolution condition. Lives on WorldState for cross-system visibility.
 
 3. **ShipRoute union type replaces PortId? RoutingDestination.** `PortRoute`, `PursuitRoute`, `PoiRoute` — consolidates routing intent into a single discriminated union. `PursuitRoute` enables interception at sea.
 
-4. **Phase graph is backward compatible.** Existing flat templates are single-phase quests. No migration needed. `IsNpcEligible` defaults to `false` for multi-phase.
+4. **No templates, no phase graphs.** "Phases" emerge from knowledge confidence thresholds. The knowledge system's existing mechanics (propagation, investigation, decay, corroboration) *are* the quest structure. This applies equally to player quests and NPC goals.
 
-5. **Trigger fact pinning is scoped.** Only facts directly referenced as phase gate conditions are pinned. Secondary/ambient facts decay normally.
+5. **Stall & Leak replaces silent expiry.** When NPC goals stall, the context leaks as gossip. NPC failure creates player opportunity rather than disappearing silently.
 
-6. **Claim circulation changes are additive.** No existing claim types change semantics. New seeding paths are layered on. High-cap faction leaks are event-driven (player agency), not RNG.
+6. **LLM selects goals, never determines outcomes.** The simulation never depends on the LLM. Rule-based fallback always produces valid goals. The LLM adds judgement and personality to goal *selection* only. The EpistemicResolver executes goals deterministically; the simulation validates outcomes mechanically.
 
-7. **Tick ordering is preserved.** No new systems are added. All changes extend existing systems within their current tick slots. Ships route on T-1 knowledge — this is intentional (yesterday's intelligence).
+7. **Claim circulation changes are additive.** No existing claim types change semantics. New seeding paths are layered on. High-cap faction leaks are event-driven (player agency), not RNG.
+
+8. **Tick ordering is preserved.** No new systems are added. All changes extend existing systems within their current tick slots. Ships route on T-1 knowledge — this is intentional (yesterday's intelligence).
