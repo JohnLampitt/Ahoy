@@ -54,6 +54,20 @@ the system it affects, the symptom, and the intended fix.
 - **Workaround:** Mean-reversion band-aid `(50 - prosperity) * 0.005` prevents
   total collapse but masks the structural deficit.
 
+### Remove InjectExternalFood Once Export Mint Sustains Population
+- **System:** EconomySystem / `InjectExternalFood`
+- **Symptom:** Food is magically injected into ports each tick with no economic
+  cost. This bypasses the zero-sum economy — food appears from nowhere.
+- **Current state:** Kept at `pop/150` rate as a safety net. Independent ports
+  get 50%. Removing prematurely causes mass starvation because the export mint
+  + merchant delivery loop isn't yet sufficient to sustain all ports.
+- **Removal condition:** Run the 5-year deep-time test WITHOUT `InjectExternalFood`.
+  If average prosperity stays above 15% and population stays above 80% of
+  starting levels, the export loop is self-sustaining and the placeholder can go.
+- **Fallback:** If removal fails, keep a minimal "fishing/foraging" baseline
+  (~20% of current rate) representing local food production that doesn't
+  require gold or trade. This is economically free but represents subsistence.
+
 ### Gold Inflation: Ports Have No Treasury
 - **System:** EconomySystem / `ExecuteMerchantTrade`
 - **Symptom:** Gold is created from nothing when merchants sell goods — there's no
