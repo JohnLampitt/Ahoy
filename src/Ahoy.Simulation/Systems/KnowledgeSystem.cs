@@ -325,6 +325,14 @@ public sealed class KnowledgeSystem : IWorldSystem
                 var raidRegion = state.GetShipRegion(sr.TargetShipId);
                 if (raidRegion.HasValue)
                     SeedRouteHazardForShip(sr.TargetShipId, raidRegion.Value, "Pirate raid — dangerous route", state, sr.Date, baseConfidence, tick);
+
+                // 6A: Deed — raider attacked victim
+                var raiderCaptain = GetCaptainId(sr.AttackerShipId, state);
+                var raidVictimCaptain = GetCaptainId(sr.TargetShipId, state);
+                if (raiderCaptain.HasValue && raidVictimCaptain.HasValue)
+                    SeedDeed(raiderCaptain.Value, raidVictimCaptain.Value, null,
+                        ActionPolarity.Hostile, ActionSeverity.Significant,
+                        "Raided merchant vessel", state, sr.Date, worldEvent.SourceLod, tick);
                 break;
             }
 
@@ -333,6 +341,14 @@ public sealed class KnowledgeSystem : IWorldSystem
                 // It propagates to ports only when the attacker docks — realistic lag.
                 // Weather destruction has no witnesses; the ship's location claim decays naturally.
                 if (sd.AttackerId is not { } attackerShipId) break;
+
+                // 6A: Deed — attacker destroyed target
+                var destroyerCaptain = GetCaptainId(attackerShipId, state);
+                var destroyedCaptain = GetCaptainId(sd.ShipId, state);
+                if (destroyerCaptain.HasValue && destroyedCaptain.HasValue)
+                    SeedDeed(destroyerCaptain.Value, destroyedCaptain.Value, null,
+                        ActionPolarity.Hostile, ActionSeverity.Severe,
+                        "Destroyed vessel in combat", state, sd.Date, worldEvent.SourceLod, tick);
                 var regionOfDestruction = sd.SourceLod == SimulationLod.Local && context.PlayerRegion.HasValue
                     ? context.PlayerRegion
                     : null;
@@ -349,6 +365,39 @@ public sealed class KnowledgeSystem : IWorldSystem
                 AddAndSupersede(state.Knowledge, new ShipHolder(attackerShipId), sinkFact, tick);
                 if (sd.SourceLod == SimulationLod.Local)
                     AddAndSupersede(state.Knowledge, new PlayerHolder(), sinkFact, tick);
+                break;
+
+            // 6A: Deed seeding for social/economic events
+            case BribeAccepted ba:
+                // Player bribed a governor — friendly deed toward governor
+                if (state.Player.CaptainIndividualId is { } playerId1)
+                    SeedDeed(playerId1, ba.GovernorId, null,
+                        ActionPolarity.Friendly, ActionSeverity.Nuisance,
+                        "Paid bribe", state, ba.Date, worldEvent.SourceLod, tick);
+                break;
+
+            case AgentBurned ab:
+                // Burning an agent — hostile deed
+                if (state.Player.CaptainIndividualId is { } playerId2)
+                    SeedDeed(playerId2, ab.AgentId, null,
+                        ActionPolarity.Hostile, ActionSeverity.Severe,
+                        "Burned intelligence agent", state, ab.Date, worldEvent.SourceLod, tick);
+                break;
+
+            case ContractFulfilled cf:
+                // Fulfilling a contract — friendly deed toward the issuer
+                if (state.Player.CaptainIndividualId is { } playerId3)
+                    SeedDeed(playerId3, cf.IssuerId, null,
+                        ActionPolarity.Friendly, ActionSeverity.Significant,
+                        "Fulfilled contract", state, cf.Date, worldEvent.SourceLod, tick);
+                break;
+
+            case NpcClaimedContract ncc:
+                // NPC fulfilled a contract — friendly deed toward issuer
+                // Find the issuer from the contract claim
+                SeedDeed(ncc.NpcId, ncc.NpcId, null, // target = self for now, issuer resolved later
+                    ActionPolarity.Friendly, ActionSeverity.Significant,
+                    "Claimed contract bounty", state, ncc.Date, worldEvent.SourceLod, tick);
                 break;
         }
     }
@@ -392,6 +441,52 @@ public sealed class KnowledgeSystem : IWorldSystem
         store.MarkSuperseded(holder, fact, tick);
         store.AddFact(holder, fact);
     }
+
+    // ---- 6A: IndividualActionClaim seeding ----
+
+    /// <summary>
+    /// Seed a deed record into the witnesses' knowledge pools.
+    /// Witnesses = ships in the region + ports in the region + player (if local).
+    /// </summary>
+    private void SeedDeed(
+        IndividualId actorId, IndividualId targetId, IndividualId? beneficiaryId,
+        ActionPolarity polarity, ActionSeverity severity, string context,
+        WorldState state, WorldDate date, SimulationLod lod, int tick)
+    {
+        var claim = new IndividualActionClaim(actorId, targetId, beneficiaryId, polarity, severity, context);
+        var fact = new KnowledgeFact
+        {
+            Claim = claim,
+            Sensitivity = KnowledgeSensitivity.Public,
+            Confidence = LodToConfidence(lod),
+            BaseConfidence = LodToConfidence(lod),
+            ObservedDate = date,
+            HopCount = 0,
+            SourceHolder = null,
+        };
+
+        // Seed into actor's own holder (they know what they did)
+        state.Knowledge.AddFact(new IndividualHolder(actorId), fact);
+
+        // Seed into target's holder (they know what happened to them)
+        state.Knowledge.AddFact(new IndividualHolder(targetId), fact);
+
+        // Seed into port if either actor or target is at a port
+        var actorPort = state.Individuals.TryGetValue(actorId, out var actorInd) ? actorInd.LocationPortId : null;
+        var targetPort = state.Individuals.TryGetValue(targetId, out var targetInd) ? targetInd.LocationPortId : null;
+        if (actorPort.HasValue)
+            state.Knowledge.AddFact(new PortHolder(actorPort.Value), fact);
+        if (targetPort.HasValue && targetPort != actorPort)
+            state.Knowledge.AddFact(new PortHolder(targetPort.Value), fact);
+
+        // Player sees local deeds
+        if (lod == SimulationLod.Local)
+            state.Knowledge.AddFact(new PlayerHolder(), fact);
+    }
+
+    /// <summary>Resolve a ShipId to its captain's IndividualId, if any.</summary>
+    private static IndividualId? GetCaptainId(ShipId shipId, WorldState state) =>
+        state.Ships.TryGetValue(shipId, out var ship) ? ship.CaptainId : null;
 
     // ---- Propagation via ship arrivals ----
 
