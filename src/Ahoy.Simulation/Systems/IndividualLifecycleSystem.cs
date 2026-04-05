@@ -165,7 +165,15 @@ public sealed class IndividualLifecycleSystem : IWorldSystem
             ObservedDate = state.Date,
             SourceHolder = new IndividualHolder(governor.Id),
         };
-        state.Knowledge.AddFact(new PortHolder(port.Id), fact);
+        // Supersede any existing contract for the same target at this port
+        var portHolder = new PortHolder(port.Id);
+        var existingContract = state.Knowledge.GetFacts(portHolder)
+            .FirstOrDefault(f => !f.IsSuperseded && f.Claim is ContractClaim cc
+                && cc.TargetSubjectKey == targetKey);
+        if (existingContract is not null)
+            state.Knowledge.MarkSuperseded(portHolder, existingContract, 0);
+
+        state.Knowledge.AddFact(portHolder, fact);
         state.Quests.RecordCooldown(targetKey, state.Date.Advance(10));
     }
 

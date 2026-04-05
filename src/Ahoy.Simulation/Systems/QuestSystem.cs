@@ -457,7 +457,7 @@ public sealed class QuestSystem : IWorldSystem
                 break;
 
             case PatrolRegionGoal patrolGoal:
-                TickPatrolPursuit(npcId, npc, patrolGoal, pursuit, state);
+                TickPatrolPursuit(npcId, npc, patrolGoal, pursuit, state, context);
                 break;
 
             case RansomGoal ransomGoal:
@@ -469,7 +469,7 @@ public sealed class QuestSystem : IWorldSystem
     }
 
     private static void TickPatrolPursuit(IndividualId npcId, Individual npc,
-        PatrolRegionGoal goal, GoalPursuit pursuit, WorldState state)
+        PatrolRegionGoal goal, GoalPursuit pursuit, WorldState state, SimulationContext context)
     {
         var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
         if (ship is null) { pursuit.State = PursuitState.Abandoned; return; }
@@ -498,7 +498,7 @@ public sealed class QuestSystem : IWorldSystem
         }
 
         // Patrol continues until war ends or goal abandoned (30 tick limit)
-        if (pursuit.ActivatedOnTick + 30 < state.Date.DaysSinceStart)
+        if (context.TickNumber - pursuit.ActivatedOnTick > 30)
             pursuit.State = PursuitState.Completed;
     }
 

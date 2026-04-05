@@ -366,6 +366,7 @@ public sealed class CaribbeanWorldDefinition : IWorldDefinition
         state.Ports[merida].Conditions   = PortConditionFlags.Famine;
         state.Ports[cumana].Conditions   = PortConditionFlags.Famine;
         state.Ports[montserrat].Conditions = PortConditionFlags.Plague;
+        state.Ports[montserrat].EpidemicTicksRemaining = 30;
 
         return new PortIds(
             veracruz, campeche, merida, havana, santiagoDeCuba,

@@ -1,5 +1,6 @@
 using Ahoy.Core.Enums;
 using Ahoy.Core.Ids;
+using Ahoy.Core.ValueObjects;
 using Ahoy.Simulation.Engine;
 using Ahoy.Simulation.Events;
 using Ahoy.Simulation.State;

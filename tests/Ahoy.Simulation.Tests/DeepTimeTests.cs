@@ -1,3 +1,4 @@
+using Ahoy.Simulation.State;
 using Ahoy.Simulation.Tests.Infrastructure;
 using Ahoy.WorldData;
 using Xunit;
@@ -22,7 +23,7 @@ public class DeepTimeTests
     [Fact]
     public void FullCaribbean_365Ticks_InvariantsHold()
     {
-        var state = CaribbeanWorldDefinition.Build();
+        var state = WorldFactory.Create(new CaribbeanWorldDefinition());
         var engine = Simulation.Engine.SimulationEngine.BuildEngine(state, rng: new Random(42));
 
         var snapshots = new List<TelemetrySnapshot>();
@@ -55,7 +56,7 @@ public class DeepTimeTests
     [Fact]
     public void FullCaribbean_5Years_InvariantsHold()
     {
-        var state = CaribbeanWorldDefinition.Build();
+        var state = WorldFactory.Create(new CaribbeanWorldDefinition());
         var engine = Simulation.Engine.SimulationEngine.BuildEngine(state, rng: new Random(42));
 
         for (int tick = 1; tick <= 1825; tick++)
@@ -75,7 +76,7 @@ public class DeepTimeTests
     [Fact]
     public void FullCaribbean_TelemetryExport_500Ticks()
     {
-        var state = CaribbeanWorldDefinition.Build();
+        var state = WorldFactory.Create(new CaribbeanWorldDefinition());
         var engine = Simulation.Engine.SimulationEngine.BuildEngine(state, rng: new Random(42));
 
         _output.WriteLine(TelemetrySnapshot.CsvHeader);

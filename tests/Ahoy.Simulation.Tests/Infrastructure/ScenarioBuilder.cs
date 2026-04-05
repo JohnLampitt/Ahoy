@@ -177,6 +177,30 @@ public sealed class ScenarioBuilder
             ObservedDate = _state.Date,
         };
         _state.Knowledge.AddFact(holder, fact);
+
+        // Apply relationship consequences when seeding deeds into individual holders
+        if (holder is IndividualHolder ih && claim is IndividualActionClaim action)
+        {
+            var observerId = ih.Individual;
+            if (observerId != action.ActorId && _state.Individuals.TryGetValue(observerId, out var observer))
+            {
+                var p = (float)action.Polarity;
+                var s = (int)action.Severity / 100f;
+                var c = confidence;
+                var mTrait = action.Polarity == ActionPolarity.Hostile
+                    ? 1.0f + (observer.Personality.Loyalty * 0.3f)
+                    : 1.0f + (observer.Personality.Greed * -0.3f);
+                var delta = p * s * c * mTrait;
+                if (observer.FactionId.HasValue && action.Polarity == ActionPolarity.Hostile
+                    && _state.Individuals.TryGetValue(action.TargetId, out var target)
+                    && target.FactionId == observer.FactionId)
+                    delta *= 1.5f;
+                _state.AdjustRelationship(observerId, action.ActorId, delta);
+                if (action.BeneficiaryId.HasValue)
+                    _state.AdjustRelationship(observerId, action.BeneficiaryId.Value, delta * 0.5f);
+            }
+        }
+
         return this;
     }
 
@@ -201,7 +225,7 @@ public sealed class ScenarioBuilder
                 RegionId = region.Id,
                 WindDirection = WindDirection.East,
                 WindStrength = WindStrength.Moderate,
-                StormPresence = StormPresence.Clear,
+                StormPresence = StormPresence.None,
             };
         }
 

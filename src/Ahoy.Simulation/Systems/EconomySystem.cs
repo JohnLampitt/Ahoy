@@ -78,7 +78,7 @@ public sealed class EconomySystem : IWorldSystem
         foreach (var port in state.Ports.Values)
         {
             if (port.Conditions.HasFlag(PortConditionFlags.Plague)) continue;
-            if (_rng.NextDouble() < 0.002) // 0.2% — rare but devastating
+            if (_rng.NextDouble() < 0.0005) // 0.05% — very rare but devastating
             {
                 port.Conditions |= PortConditionFlags.Plague;
                 port.EpidemicTicksRemaining = 30;
@@ -201,6 +201,11 @@ public sealed class EconomySystem : IWorldSystem
             .Count(g => economy.Demand.GetValueOrDefault(g) > economy.Supply.GetValueOrDefault(g));
 
         var prosperityDelta = (surplusGoods - shortageGoods) * 0.5f;
+
+        // Baseline recovery: ports slowly drift toward 50 (mean-reversion)
+        // This prevents permanent economic collapse from transient crises
+        prosperityDelta += (50f - port.Prosperity) * 0.005f;
+
         port.Prosperity = Math.Clamp(port.Prosperity + prosperityDelta, 0f, 100f);
     }
 

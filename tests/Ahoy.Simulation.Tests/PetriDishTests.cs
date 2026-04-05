@@ -34,12 +34,12 @@ public class PetriDishTests
         // Captain Garcia has a ship docked at Havana
         builder.AddShip("San Felipe", spain, captainId: victim, dockedAt: port);
 
-        // Seed a hostile deed: Blackbeard raided Don Garcia (Severe)
-        builder.SeedFact(
-            new PortHolder(port),
-            new IndividualActionClaim(villain, victim, null,
-                ActionPolarity.Hostile, ActionSeverity.Severe, "Raided vessel"),
-            confidence: 0.85f);
+        // Seed a hostile deed into the victim's knowledge (they experienced it directly)
+        // and into the port (witnesses saw it happen)
+        var deedClaim = new IndividualActionClaim(villain, victim, null,
+            ActionPolarity.Hostile, ActionSeverity.Severe, "Raided vessel");
+        builder.SeedFact(new IndividualHolder(victim), deedClaim, confidence: 0.85f);
+        builder.SeedFact(new PortHolder(port), deedClaim, confidence: 0.85f);
 
         var (engine, state) = builder.BuildWithState();
 

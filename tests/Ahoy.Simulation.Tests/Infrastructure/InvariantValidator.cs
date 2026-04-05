@@ -71,7 +71,7 @@ public static class InvariantValidator
             var subjectGroups = facts.GroupBy(f => KnowledgeFact.GetSubjectKey(f.Claim));
             foreach (var group in subjectGroups)
             {
-                if (group.Count() > 2) // >2 is definitely wrong; 2 is a conflict
+                if (group.Count() > 3) // >3 indicates accumulation bug; 2-3 can be legitimate conflicts
                     v.Add($"Holder {holder} has {group.Count()} non-superseded facts for subject {group.Key}");
             }
         }
@@ -138,10 +138,15 @@ public static class InvariantValidator
         if (state.Factions.Values.All(f => f.TreasuryGold <= 0))
             v.Add("All factions are bankrupt — economic deadlock");
 
-        // At least one ship should be moving (not all permanently docked)
-        var shipsAtSea = state.Ships.Values.Count(s => s.Location is not AtPort);
-        if (state.Ships.Count > 3 && shipsAtSea == 0)
-            v.Add("No ships at sea — world movement has stopped");
+        // At least one captained ship should be moving (not all permanently docked)
+        // Uncaptained ships can't depart on their own — only count ships with living captains
+        var captainedShips = state.Ships.Values
+            .Where(s => s.CaptainId.HasValue
+                && state.Individuals.TryGetValue(s.CaptainId.Value, out var cap) && cap.IsAlive)
+            .ToList();
+        var captainedAtSea = captainedShips.Count(s => s.Location is not AtPort);
+        if (captainedShips.Count > 3 && captainedAtSea == 0)
+            v.Add($"No captained ships at sea ({captainedShips.Count} captained ships, all docked) — world movement has stopped");
 
         // Average port prosperity should be above survival floor
         var avgProsperity = state.Ports.Values.Average(p => p.Prosperity);

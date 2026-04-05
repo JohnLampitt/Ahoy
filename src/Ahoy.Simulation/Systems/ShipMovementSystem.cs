@@ -448,7 +448,12 @@ public sealed class ShipMovementSystem : IWorldSystem
             homePort = captain.HomePortId;
         }
 
-        var candidate = best ?? homePort ?? GetRandomAccessiblePort(currentRegion, state);
+        // Exclude current port to prevent routing to where we already are
+        var currentPort = ship.Location is AtPort ap ? (PortId?)ap.Port : null;
+        if (best == currentPort) best = null;
+        if (homePort == currentPort) homePort = null;
+
+        var candidate = best ?? homePort ?? GetRandomAccessiblePort(currentRegion, state, excludePort: currentPort);
         if (!candidate.HasValue) return;
 
         ship.Route = new PortRoute(candidate.Value);
@@ -528,7 +533,7 @@ public sealed class ShipMovementSystem : IWorldSystem
         return ids;
     }
 
-    private PortId? GetRandomAccessiblePort(RegionId from, WorldState state)
+    private PortId? GetRandomAccessiblePort(RegionId from, WorldState state, PortId? excludePort = null)
     {
         var candidates = new List<PortId>();
         if (state.Regions.TryGetValue(from, out var region))
@@ -537,6 +542,9 @@ public sealed class ShipMovementSystem : IWorldSystem
         foreach (var adj in region?.AdjacentRegions ?? [])
             if (state.Regions.TryGetValue(adj, out var adjRegion))
                 candidates.AddRange(adjRegion.Ports);
+
+        if (excludePort.HasValue)
+            candidates.Remove(excludePort.Value);
 
         if (candidates.Count == 0) return null;
         return candidates[_rng.Next(candidates.Count)];
