@@ -8,17 +8,22 @@ using Ahoy.Simulation.State;
 namespace Ahoy.Simulation.Systems;
 
 /// <summary>
-/// System 7 — runs after KnowledgeSystem.
-/// Contract-only quest system:
-///   1. Ticks active contract quests (fulfillment checks, LostTrail, expiry).
+/// System 8 — runs after KnowledgeSystem.
+/// Contract quest system + NPC goal pursuit:
+///   1. Ticks active contract quests (fulfillment checks, LostTrail, expiry, ClaimedByNpc).
 ///   2. Scans player ContractClaims and activates new ContractQuestInstances.
+///   3. Assigns NPC goals (Pondering → Active) and ticks active pursuits (EpistemicResolver).
 /// </summary>
 public sealed class QuestSystem : IWorldSystem
 {
+    private const int StallAbandonThreshold = 14;
+    private const float IntelConfidenceFloor = 0.30f;
+
     public void Tick(WorldState state, SimulationContext context, IEventEmitter events)
     {
         TickActiveContractQuests(state, context, events);
         ScanForContractQuests(state, context, events);
+        TickNpcGoalPursuit(state, context, events);
     }
 
     // ---- Active quest maintenance ----
@@ -271,5 +276,298 @@ public sealed class QuestSystem : IWorldSystem
             SimulationLod.Local);
 
         return true;
+    }
+
+    // ======== 5B: NPC Goal Pursuit ========
+
+    private static void TickNpcGoalPursuit(WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        // Phase 1: Assign goals to Pondering NPCs
+        AssignNpcGoals(state, context);
+
+        // Phase 2: Tick active pursuits (EpistemicResolver)
+        foreach (var (npcId, pursuit) in state.NpcPursuits.ToList())
+        {
+            switch (pursuit.State)
+            {
+                case PursuitState.Active:
+                    TickActivePursuit(npcId, pursuit, state, context, events);
+                    break;
+
+                case PursuitState.Stalled:
+                    pursuit.TicksStalled++;
+                    if (pursuit.TicksStalled > StallAbandonThreshold)
+                    {
+                        pursuit.State = PursuitState.Abandoned;
+                        EmitPursuitAbandoned(npcId, pursuit, state, events);
+                    }
+                    break;
+
+                case PursuitState.Completed:
+                case PursuitState.Abandoned:
+                    // Transition to Pondering for next goal on next tick
+                    state.NpcPursuits[npcId] = new GoalPursuit
+                    {
+                        ActiveGoal = pursuit.ActiveGoal, // placeholder — will be replaced
+                        State = PursuitState.Pondering,
+                        ActivatedOnTick = context.TickNumber,
+                    };
+                    break;
+            }
+        }
+    }
+
+    // ---- 5B-3: NPC Goal Assignment ----
+
+    private static void AssignNpcGoals(WorldState state, SimulationContext context)
+    {
+        foreach (var individual in state.Individuals.Values)
+        {
+            if (!individual.IsAlive) continue;
+
+            // Only combat-capable roles pursue goals
+            if (individual.Role is not (IndividualRole.PirateCaptain
+                or IndividualRole.NavalOfficer
+                or IndividualRole.Privateer
+                or IndividualRole.Informant))
+                continue;
+
+            // Check if already has a pursuit
+            if (state.NpcPursuits.TryGetValue(individual.Id, out var existing)
+                && existing.State is not PursuitState.Pondering)
+                continue;
+
+            // Rule-based goal assignment: scan IndividualHolder for actionable ContractClaims
+            var holder = new IndividualHolder(individual.Id);
+            var facts = state.Knowledge.GetFacts(holder)
+                .Where(f => !f.IsSuperseded)
+                .ToList();
+
+            var bestContract = facts
+                .Where(f => f.Claim is ContractClaim && f.Confidence > 0.40f)
+                .OrderByDescending(f => f.Confidence)
+                .Select(f => (ContractClaim)f.Claim)
+                .FirstOrDefault();
+
+            if (bestContract is null) continue;
+
+            // Informants: only TargetDead contracts (assassination, not naval combat)
+            if (individual.Role == IndividualRole.Informant
+                && bestContract.Condition != ContractConditionType.TargetDead)
+                continue;
+
+            // Intel gate: need a separate fact about the target
+            var hasIntel = facts.Any(f =>
+                KnowledgeFact.GetSubjectKey(f.Claim) == bestContract.TargetSubjectKey
+                && f.Confidence > 0.50f);
+            if (!hasIntel) continue;
+
+            // Assign goal
+            var goal = new FulfillContractGoal(
+                Guid.NewGuid(), individual.Id, bestContract);
+
+            state.NpcPursuits[individual.Id] = new GoalPursuit
+            {
+                ActiveGoal = goal,
+                State = PursuitState.Active,
+                ActivatedOnTick = context.TickNumber,
+            };
+
+            // Set routing — find target's last known location
+            SetPursuitRoute(individual, bestContract, facts, state);
+        }
+    }
+
+    /// <summary>Set the NPC's ship route based on known target location.</summary>
+    private static void SetPursuitRoute(Individual npc, ContractClaim contract,
+        List<KnowledgeFact> npcFacts, WorldState state)
+    {
+        // Find the NPC's ship
+        var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npc.Id);
+        if (ship is null) return;
+
+        // Find target's last known location
+        if (contract.Condition == ContractConditionType.TargetDestroyed
+            && TryParseShipId(contract.TargetSubjectKey, out var targetShipId))
+        {
+            var locationFact = npcFacts
+                .Where(f => f.Claim is ShipLocationClaim slc
+                    && KnowledgeFact.GetSubjectKey(f.Claim) == contract.TargetSubjectKey)
+                .OrderByDescending(f => f.Confidence)
+                .FirstOrDefault();
+
+            if (locationFact?.Claim is ShipLocationClaim slc)
+            {
+                var targetRegion = slc.LastKnownLocation switch
+                {
+                    AtSea ats => ats.Region,
+                    AtPort atp when state.Ports.TryGetValue(atp.Port, out var tp) => tp.RegionId,
+                    EnRoute er => er.To,
+                    _ => (RegionId?)null,
+                };
+
+                if (targetRegion.HasValue)
+                    ship.Route = new PursuitRoute(targetShipId, targetRegion.Value);
+            }
+        }
+        else if (contract.Condition == ContractConditionType.TargetDead
+            && TryParseIndividualId(contract.TargetSubjectKey, out var targetIndId))
+        {
+            // Route to target individual's known location
+            var whereabouts = npcFacts
+                .Where(f => f.Claim is IndividualWhereaboutsClaim iwc && iwc.Individual == targetIndId)
+                .OrderByDescending(f => f.Confidence)
+                .FirstOrDefault();
+
+            if (whereabouts?.Claim is IndividualWhereaboutsClaim iwc && iwc.Port.HasValue)
+                ship.Route = new PortRoute(iwc.Port.Value);
+        }
+    }
+
+    // ---- 5B-4: EpistemicResolver — Active Pursuit Tick ----
+
+    private static void TickActivePursuit(IndividualId npcId, GoalPursuit pursuit,
+        WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        if (pursuit.ActiveGoal is not FulfillContractGoal contractGoal) return;
+        if (!state.Individuals.TryGetValue(npcId, out var npc) || !npc.IsAlive)
+        {
+            pursuit.State = PursuitState.Abandoned;
+            return;
+        }
+
+        var contract = contractGoal.Contract;
+        var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
+        if (ship is null)
+        {
+            pursuit.State = PursuitState.Abandoned;
+            return;
+        }
+
+        var holder = new IndividualHolder(npcId);
+
+        // Check if intel has decayed below floor → Stall
+        var intelFact = state.Knowledge.GetFacts(holder)
+            .FirstOrDefault(f => !f.IsSuperseded
+                && KnowledgeFact.GetSubjectKey(f.Claim) == contract.TargetSubjectKey);
+
+        if (intelFact is null || intelFact.Confidence < IntelConfidenceFloor)
+        {
+            pursuit.State = PursuitState.Stalled;
+            pursuit.TicksStalled = 1;
+            ship.Route = null; // clear pursuit route, fall back to normal routing
+            return;
+        }
+
+        // Check fulfillment — same logic as player quests
+        bool fulfilled = false;
+        if (contract.Condition == ContractConditionType.TargetDestroyed
+            && TryParseShipId(contract.TargetSubjectKey, out var targetShipId))
+        {
+            // Check if in same region as target
+            var npcRegion = state.GetShipRegion(ship.Id);
+            var targetRegion = state.GetShipRegion(targetShipId);
+
+            if (npcRegion.HasValue && targetRegion.HasValue && npcRegion == targetRegion)
+            {
+                // Same region — attempt interception (simplified stat check)
+                if (state.Ships.TryGetValue(targetShipId, out var target) && target.HullIntegrity <= 0)
+                    fulfilled = true;
+                // Future: actual combat stat check here
+            }
+        }
+        else if (contract.Condition == ContractConditionType.TargetDead
+            && TryParseIndividualId(contract.TargetSubjectKey, out var targetIndId))
+        {
+            if (state.Individuals.TryGetValue(targetIndId, out var target2) && !target2.IsAlive)
+                fulfilled = true;
+
+            // Informant assassination: stat-check on arrival at target's port
+            if (npc.Role == IndividualRole.Informant && target2 is { IsAlive: true }
+                && ship.Location is AtPort atPort && target2.LocationPortId == atPort.Port)
+            {
+                var cap = npc.FactionId.HasValue
+                    && state.Factions.TryGetValue(npc.FactionId.Value, out var f)
+                    ? f.IntelligenceCapability : 0.30f;
+                // Stat check: ~cap chance of success
+                // Note: no RNG available in static context. Defer actual combat to a future system.
+                // For now, Informants route but don't auto-resolve.
+            }
+        }
+
+        if (fulfilled)
+        {
+            pursuit.State = PursuitState.Completed;
+            npc.CurrentGold += contract.GoldReward;
+            ship.Route = null;
+
+            var lod = state.GetShipRegion(ship.Id) is { } r ? context.GetLod(r) : SimulationLod.Distant;
+            events.Emit(new NpcClaimedContract(
+                state.Date, lod, npcId, contract.TargetSubjectKey, contract.GoldReward), lod);
+
+            // Expire player's quest for the same target
+            foreach (var quest in state.Quests.ActiveContractQuests)
+            {
+                if (quest.Contract.TargetSubjectKey == contract.TargetSubjectKey
+                    && quest.Status == ContractQuestStatus.Active)
+                {
+                    quest.Status = ContractQuestStatus.ClaimedByNpc;
+                    quest.ResolvedDate = state.Date;
+                }
+            }
+        }
+    }
+
+    // ---- Stall & Leak ----
+
+    private static void EmitPursuitAbandoned(IndividualId npcId, GoalPursuit pursuit,
+        WorldState state, IEventEmitter events)
+    {
+        var description = pursuit.ActiveGoal switch
+        {
+            FulfillContractGoal fcg => $"Abandoned pursuit of {fcg.Contract.TargetSubjectKey}",
+            _ => "Abandoned goal",
+        };
+
+        var lod = SimulationLod.Distant;
+        if (state.Individuals.TryGetValue(npcId, out var npc) && npc.LocationPortId.HasValue
+            && state.Ports.TryGetValue(npc.LocationPortId.Value, out var port)
+            && state.Regions.ContainsKey(port.RegionId))
+        {
+            // Emit at the NPC's current location LOD
+        }
+
+        events.Emit(new NpcPursuitAbandoned(state.Date, lod, npcId, description), lod);
+
+        // Stall & Leak: inject highest-confidence fact about the goal into port gossip
+        // If AtSea, fact stays in ShipHolder and leaks on next dock (via ArrivedThisTick propagation)
+        var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
+        if (ship is null) return;
+
+        ship.Route = null; // clear pursuit route
+
+        if (pursuit.ActiveGoal is FulfillContractGoal contractGoal)
+        {
+            var holder = new IndividualHolder(npcId);
+            var bestFact = state.Knowledge.GetFacts(holder)
+                .Where(f => !f.IsSuperseded
+                    && KnowledgeFact.GetSubjectKey(f.Claim) == contractGoal.Contract.TargetSubjectKey)
+                .OrderByDescending(f => f.Confidence)
+                .FirstOrDefault();
+
+            if (bestFact is not null)
+            {
+                // If docked, leak directly to port. If at sea, seed into ShipHolder for dock propagation.
+                if (ship.Location is AtPort atPort)
+                {
+                    state.Knowledge.AddFact(new PortHolder(atPort.Port), bestFact);
+                }
+                else
+                {
+                    // Already in ShipHolder — it will propagate on next dock via ArrivedThisTick
+                    state.Knowledge.AddFact(new ShipHolder(ship.Id), bestFact);
+                }
+            }
+        }
     }
 }
