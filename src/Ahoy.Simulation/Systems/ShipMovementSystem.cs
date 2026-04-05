@@ -204,6 +204,7 @@ public sealed class ShipMovementSystem : IWorldSystem
                 var portId = portRoute.Destination;
                 ship.Location = new AtPort(portId);
                 ship.ArrivedThisTick = true;
+                ship.RecordPortVisit(portId);
                 ship.RouteProgressAccumulator = 0;
                 ship.Route = null;
                 ship.TicksDockedAtCurrentPort = 0;
@@ -240,6 +241,7 @@ public sealed class ShipMovementSystem : IWorldSystem
                 {
                     ship.Location = new AtPort(nearestPort.Id);
                     ship.ArrivedThisTick = true;
+                    ship.RecordPortVisit(nearestPort.Id);
                     ship.RouteProgressAccumulator = 0;
                     ship.TicksDockedAtCurrentPort = 0;
                     nearestPort.DockedShips.Add(ship.Id);
@@ -693,9 +695,14 @@ public sealed class ShipMovementSystem : IWorldSystem
     /// Falls back to highest-confidence known port if no margin data available.
     /// </summary>
     /// <summary>
-    /// Score candidate ports by expected profit-per-day.
-    /// Phase 4: Divides margin by travel time so distant high-value crises
-    /// outscore nearby low-value routine runs.
+    /// Score candidate ports by profit-per-day with round-trip arbitrage and recency penalty.
+    ///
+    /// With cargo: score by sell price at destination / travel time.
+    /// Without cargo: score by round-trip arbitrage — "if I go to port A, buy their
+    /// cheap goods, where can I sell them, and what's the total profit for the circuit?"
+    ///
+    /// Recency penalty: ports visited in the last 5 stops are penalised to prevent
+    /// ping-pong patterns and encourage trade route diversity.
     /// </summary>
     private static PortId? ScoreMerchantDestination(
         List<(KnowledgeFact Fact, PortPriceClaim Claim)> knownPrices,
@@ -707,23 +714,27 @@ public sealed class ShipMovementSystem : IWorldSystem
     {
         if (knownPrices.Count == 0) return null;
 
-        // Filter out known dangerous ports (epidemic, blockade) — merchants avoid them
+        // Filter out known dangerous ports
         if (dangerousPorts is { Count: > 0 })
             knownPrices = knownPrices.Where(x => !dangerousPorts.Contains(x.Claim.Port)).ToList();
         if (knownPrices.Count == 0) return null;
 
-        var hasCargo = ship.Cargo.Any(kv => kv.Value > 0);
         var portScores = new Dictionary<PortId, float>();
+        var hasCargo = ship.Cargo.Any(kv => kv.Value > 0);
+
+        // Group known prices by port for round-trip evaluation
+        var pricesByPort = knownPrices
+            .GroupBy(x => x.Claim.Port)
+            .ToDictionary(g => g.Key, g => g.ToList());
 
         if (hasCargo)
         {
-            // Score ports by: profit-per-day for goods we carry
+            // Score by: sell profit for current cargo / travel time
             foreach (var (fact, claim) in knownPrices)
             {
                 if (!ship.Cargo.ContainsKey(claim.Good) || ship.Cargo[claim.Good] <= 0) continue;
                 var rawScore = claim.Price * fact.Confidence * ship.Cargo[claim.Good];
                 var portRegion = state.Ports.TryGetValue(claim.Port, out var p) ? p.RegionId : currentRegion;
-                // Floor 0.5f for intra-region: strongly prioritise nearby crises
                 var travelDays = Math.Max(0.5f, GetTravelDays(currentRegion, portRegion, state));
                 portScores.TryGetValue(claim.Port, out var existing);
                 portScores[claim.Port] = existing + rawScore / travelDays;
@@ -731,16 +742,49 @@ public sealed class ShipMovementSystem : IWorldSystem
         }
         else
         {
-            // No cargo — route toward port with lowest known prices / travel time
-            foreach (var (fact, claim) in knownPrices)
+            // Round-trip arbitrage: for each candidate port, score by:
+            // "what can I buy cheap there, and what's the best known sell price elsewhere?"
+            foreach (var (candidatePort, candidatePrices) in pricesByPort)
             {
-                if (claim.Price <= 0) continue;
-                var portRegion = state.Ports.TryGetValue(claim.Port, out var p) ? p.RegionId : currentRegion;
-                var travelDays = Math.Max(0.5f, GetTravelDays(currentRegion, portRegion, state));
-                var score = (fact.Confidence / claim.Price) / travelDays;
-                portScores.TryGetValue(claim.Port, out var existing);
-                portScores[claim.Port] = existing + score;
+                var portRegion = state.Ports.TryGetValue(candidatePort, out var cp) ? cp.RegionId : currentRegion;
+                var legOneDays = Math.Max(0.5f, GetTravelDays(currentRegion, portRegion, state));
+
+                float bestRoundTripScore = 0;
+
+                foreach (var (buyFact, buyClaim) in candidatePrices)
+                {
+                    if (buyClaim.Price <= 0) continue;
+                    var buyPrice = buyClaim.Price;
+
+                    // Find the best known sell price for this good at any OTHER port
+                    var bestSell = knownPrices
+                        .Where(x => x.Claim.Good == buyClaim.Good && x.Claim.Port != candidatePort)
+                        .Select(x => (Price: x.Claim.Price * x.Fact.Confidence,
+                                      Region: state.Ports.TryGetValue(x.Claim.Port, out var sp) ? sp.RegionId : currentRegion))
+                        .OrderByDescending(x => x.Price)
+                        .FirstOrDefault();
+
+                    if (bestSell.Price <= buyPrice) continue;
+
+                    var margin = bestSell.Price - buyPrice;
+                    var legTwoDays = Math.Max(0.5f, GetTravelDays(portRegion, bestSell.Region, state));
+                    var roundTripDays = legOneDays + legTwoDays;
+
+                    // Score = margin per unit × estimated cargo capacity / total round-trip days
+                    var score = (margin * buyFact.Confidence * 30f) / roundTripDays;
+                    bestRoundTripScore = Math.Max(bestRoundTripScore, score);
+                }
+
+                if (bestRoundTripScore > 0)
+                    portScores[candidatePort] = bestRoundTripScore;
             }
+        }
+
+        // Apply recency penalty: halve score for each recent visit
+        foreach (var recentPort in ship.RecentPorts)
+        {
+            if (portScores.ContainsKey(recentPort))
+                portScores[recentPort] *= 0.5f;
         }
 
         if (portScores.Count > 0)

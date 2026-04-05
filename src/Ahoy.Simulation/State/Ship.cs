@@ -83,6 +83,19 @@ public sealed class Ship
     public bool IsPlayerShip { get; init; }
     public bool IsPirate { get; set; }
 
+    /// <summary>
+    /// Recent port visit history (last 5 ports). Used by merchant routing to penalise
+    /// ping-pong patterns and encourage trade route diversity.
+    /// </summary>
+    public Queue<PortId> RecentPorts { get; } = new();
+
+    public void RecordPortVisit(PortId portId)
+    {
+        RecentPorts.Enqueue(portId);
+        while (RecentPorts.Count > 5)
+            RecentPorts.Dequeue();
+    }
+
     // --- Crisis state ---
     /// <summary>True when crew carries infectious disease. Spreads to ports on dock. (Crisis 2: Epidemic)</summary>
     public bool HasInfectedCrew { get; set; }
