@@ -88,7 +88,7 @@ New method `TickSurvival(Port)` runs before `ProduceAndConsume`:
 2. If supply[Food] >= foodNeeded:
    - Consume food
    - Organic growth: population += population * 0.001 (0.1% per day, ~44% per year)
-   - Cap at port's max capacity (based on original seeded population × 1.5)
+   - No hard cap — Malthusian Trap provides natural ceiling
 3. If supply[Food] < foodNeeded:
    - Consume all remaining food
    - starvationRatio = 1 - (foodAvailable / foodNeeded)
@@ -180,6 +180,12 @@ if port cannot afford food at effective prices:
 The faction treasury — not the port's local economy — backs the contract.
 Merchants know the payout is guaranteed by the Crown.
 
+**Double-dip prevention:** The existing `TryFulfillGoodsDelivery` in QuestSystem
+already removes cargo from the ship and transfers it directly to port supply
+as part of contract resolution. The merchant gets the faction bounty but cannot
+also sell the same goods on the local market — the cargo is consumed by the
+contract. This is correct by construction, not a special case.
+
 ### 3B: PortStarvation Event
 
 **File:** `src/Ahoy.Simulation/Events/WorldEvent.cs`
@@ -212,7 +218,8 @@ travel time:
 // New:     score = (price × confidence × cargoQty) / estimatedTravelDays
 
 var portRegion = state.Ports.TryGetValue(claim.Port, out var p) ? p.RegionId : currentRegion;
-var travelDays = Math.Max(1f, GetTravelDays(currentRegion, portRegion, state));
+// Floor at 0.5f for intra-region: merchants strongly prioritise crises in their own region
+var travelDays = Math.Max(0.5f, GetTravelDays(currentRegion, portRegion, state));
 var score = (claim.Price * fact.Confidence * ship.Cargo[claim.Good]) / travelDays;
 ```
 
@@ -275,8 +282,12 @@ choose the most urgent destination.
    an abandoned outpost that can be resettled. This prevents permanent map
    holes and maintains the possibility of recovery.
 
-2. **Growth cap at 1.5× initial population.** Prevents runaway population
-   growth in prosperous ports. A capital seeded at 10,000 caps at 15,000.
+2. **Growth is unchecked — the Malthusian Trap replaces hard caps.** Population
+   grows as long as food is available. No arbitrary ceiling. A port that grows
+   from 10,000 to 25,000 needs 2.5× food, but its `BaseProductionRate` doesn't
+   scale — it can't generate enough trade goods to buy that food. The port
+   starves back to its natural carrying capacity organically. This produces
+   population cycles, not artificial plateaus.
 
 3. **Essential goods exponent = 2.0.** Food at half supply = 4× price.
    Quarter supply = 16×. This is aggressive enough to redirect merchant
