@@ -58,6 +58,8 @@ public sealed class FactionSystem : IWorldSystem
             TickRelationshipDecay(faction);
             TickIntelligence(faction);
             EmitStrengthFactIfChanged(faction, factionId, state, context);
+            TickIntentionLeaks(faction, factionId, state, context, events);
+            TickCounterIntelligence(faction, factionId, state, context.TickNumber);
 
             if (faction.Type == FactionType.Colonial)
                 SeedContracts(faction, factionId, state, context);
@@ -660,6 +662,129 @@ public sealed class FactionSystem : IWorldSystem
                     }
                     break;
             }
+        }
+    }
+
+    // ---- 5E-3: FactionIntentionClaim leak mechanic ----
+
+    /// <summary>
+    /// Factions leak Secret intentions under stress or low capability.
+    /// Low-capability factions (< 0.35): 2%/tick passive leak — structurally leaky organisations.
+    /// All factions under systemic stress: 15%/tick event-driven leak:
+    ///   1. Treasury < expenditure * 5 (can't pay spies)
+    ///   2. NavalStrength dropped > 50% in 10 ticks (faction in disarray)
+    /// Leaked intention downgrades from Secret to Restricted in a random controlled port.
+    /// </summary>
+    private void TickIntentionLeaks(Faction faction, FactionId factionId,
+        WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        // Determine leak chance
+        var leakChance = 0.0;
+
+        // Low-capability passive leak
+        if (faction.IntelligenceCapability < 0.35f)
+            leakChance = 0.02;
+
+        // Stress-driven leaks (override passive if higher)
+        bool underStress = false;
+
+        // Stress trigger 1: treasury crisis
+        var expenditure = faction.ControlledPorts.Count * 50 + faction.NavalStrength * 20; // rough estimate
+        if (faction.TreasuryGold < expenditure * 5)
+            underStress = true;
+
+        // Stress trigger 2: naval collapse (> 50% drop tracked via _lastEmittedNavalStrength)
+        if (_lastEmittedNavalStrength.TryGetValue(factionId, out var lastStrength)
+            && lastStrength > 0
+            && faction.NavalStrength < lastStrength / 2)
+            underStress = true;
+
+        if (underStress)
+            leakChance = Math.Max(leakChance, 0.15);
+
+        if (leakChance <= 0 || _rng.NextDouble() >= leakChance) return;
+
+        // Find a Secret FactionIntentionClaim in this faction's holder
+        var factionHolder = new FactionHolder(factionId);
+        var secretIntention = state.Knowledge.GetFacts(factionHolder)
+            .FirstOrDefault(f => !f.IsSuperseded
+                && f.Claim is FactionIntentionClaim
+                && f.Sensitivity == KnowledgeSensitivity.Secret);
+
+        if (secretIntention is null) return;
+
+        // Pick a random controlled port to leak into
+        var controlledPorts = faction.ControlledPorts
+            .Where(pid => state.Ports.ContainsKey(pid))
+            .ToList();
+        if (controlledPorts.Count == 0) return;
+
+        var leakPort = controlledPorts[_rng.Next(controlledPorts.Count)];
+
+        // Inject a Restricted copy into the port's knowledge pool
+        var leakedFact = new KnowledgeFact
+        {
+            Claim = secretIntention.Claim,
+            Sensitivity = KnowledgeSensitivity.Restricted, // downgraded from Secret
+            Confidence = secretIntention.Confidence * 0.70f, // degraded — tavern whisper
+            BaseConfidence = secretIntention.Confidence * 0.70f,
+            ObservedDate = state.Date,
+            HopCount = 1,
+            SourceHolder = factionHolder,
+        };
+        state.Knowledge.AddFact(new PortHolder(leakPort), leakedFact);
+    }
+
+    // ---- 5E-2: IndividualAllegianceClaim counter-intelligence ----
+
+    /// <summary>
+    /// Faction counter-intelligence: high-capability factions can detect enemy infiltrators
+    /// in their controlled ports and emit allegiance facts into FactionHolder.
+    /// Chance = IntelligenceCapability * 0.01 per tick per infiltrator (~1% at cap 1.0).
+    /// </summary>
+    private void TickCounterIntelligence(Faction faction, FactionId factionId,
+        WorldState state, int tick)
+    {
+        if (faction.IntelligenceCapability < 0.40f) return; // low-cap factions don't counter-intel
+
+        foreach (var individual in state.Individuals.Values)
+        {
+            if (!individual.IsAlive) continue;
+            if (individual.FactionId != factionId) continue; // not our agent
+            if (individual.ClaimedFactionId is null) continue; // not an infiltrator
+            if (individual.ClaimedFactionId == factionId) continue; // claiming to be us (not infiltrating us)
+
+            // This individual claims to belong to another faction but actually serves us.
+            // Skip — we already know about our own agents.
+            // What we want: detect enemy infiltrators pretending to be OUR people.
+        }
+
+        // Detect enemy infiltrators in our ports: individuals whose FactionId != factionId
+        // but whose ClaimedFactionId == factionId (pretending to be one of ours)
+        foreach (var individual in state.Individuals.Values)
+        {
+            if (!individual.IsAlive) continue;
+            if (individual.FactionId == factionId) continue; // actually ours
+            if (individual.ClaimedFactionId != factionId) continue; // not pretending to be ours
+            if (individual.IsCompromised) continue; // already burned
+
+            var detectChance = faction.IntelligenceCapability * 0.01;
+            if (_rng.NextDouble() >= detectChance) continue;
+
+            // Detected! Seed allegiance fact into FactionHolder
+            var allegianceFact = new KnowledgeFact
+            {
+                Claim = new IndividualAllegianceClaim(
+                    individual.Id,
+                    ClaimedFaction: factionId,
+                    ActualFaction: individual.FactionId),
+                Sensitivity = KnowledgeSensitivity.Restricted,
+                Confidence = 0.80f,
+                BaseConfidence = 0.80f,
+                ObservedDate = state.Date,
+                SourceHolder = new FactionHolder(factionId),
+            };
+            state.Knowledge.AddFact(new FactionHolder(factionId), allegianceFact);
         }
     }
 }

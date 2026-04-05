@@ -78,68 +78,78 @@ public sealed class ShipMovementSystem : IWorldSystem
         // Track how long this ship has been docked
         ship.TicksDockedAtCurrentPort++;
 
-        // POI routing: depart toward a POI destination if set (player or NPC)
-        if (ship.PoiDestination.HasValue
-            && state.OceanPois.TryGetValue(ship.PoiDestination.Value, out var poiDest)
-            && state.Ports.TryGetValue(atPort.Port, out var departingPortForPoi))
+        if (!state.Ports.TryGetValue(atPort.Port, out var currentPort)) return;
+        var fromRegion = currentPort.RegionId;
+
+        // Handle route based on ShipRoute union type
+        switch (ship.Route)
         {
-            var poiRegion = poiDest.RegionId;
-            if (departingPortForPoi.RegionId == poiRegion)
+            case PoiRoute poiRoute
+                when state.OceanPois.TryGetValue(poiRoute.Poi, out var poiDest):
             {
-                // Already in the POI's region — go directly to AtPoi
-                events.Emit(new ShipDeparted(state.Date, lod, ship.Id, atPort.Port), lod);
-                ship.Location = new AtPoi(ship.PoiDestination.Value, poiRegion);
-            }
-            else
-            {
-                var nextRegion = FindNextRegion(departingPortForPoi.RegionId, poiRegion, state);
-                if (nextRegion.HasValue)
+                if (fromRegion == poiDest.RegionId)
                 {
-                    var travelDays = ship.ConvoyId.HasValue
-                        ? CalculateConvoyTravelDays(ship.ConvoyId.Value,
-                            departingPortForPoi.RegionId, nextRegion.Value, state)
-                        : GetTravelDays(departingPortForPoi.RegionId, nextRegion.Value, state);
-                    ship.Location = new EnRoute(departingPortForPoi.RegionId, nextRegion.Value, 0f, travelDays);
                     events.Emit(new ShipDeparted(state.Date, lod, ship.Id, atPort.Port), lod);
+                    ship.Location = new AtPoi(poiRoute.Poi, poiDest.RegionId);
                 }
-            }
-            return;
-        }
-
-        // Player ship — only departs via PlayerCommand (for port routing)
-        if (ship.IsPlayerShip) return;
-
-        // NPC ship at port with no destination — pick one if agent has knowledge or has waited long enough
-        if (!ship.RoutingDestination.HasValue &&
-            state.Ports.TryGetValue(atPort.Port, out var currentPort2))
-        {
-            var shouldDepart = ShouldDepartPort(ship, state);
-            if (shouldDepart)
-                AssignNpcRoute(ship, currentPort2.RegionId, state);
-        }
-
-        // NPC with a routing destination set — depart
-        if (ship.RoutingDestination.HasValue &&
-            state.Ports.TryGetValue(ship.RoutingDestination.Value, out var dest) &&
-            state.Ports.TryGetValue(atPort.Port, out var currentPort))
-        {
-            var destRegion = dest.RegionId;
-            var fromRegion = currentPort.RegionId;
-
-            if (fromRegion != destRegion)
-            {
-                // Move toward dest region
-                var nextRegion = FindNextRegion(fromRegion, destRegion, state);
-                if (nextRegion.HasValue)
+                else
                 {
-                    var travelDays = ship.ConvoyId.HasValue
-                        ? CalculateConvoyTravelDays(ship.ConvoyId.Value, fromRegion, nextRegion.Value, state)
-                        : GetTravelDays(fromRegion, nextRegion.Value, state);
-                    ship.Location = new EnRoute(fromRegion, nextRegion.Value, 0f, travelDays);
-                    events.Emit(new ShipDeparted(state.Date, lod, ship.Id, atPort.Port), lod);
+                    DepartTowardRegion(ship, fromRegion, poiDest.RegionId, atPort.Port, state, events, lod);
                 }
+                return;
             }
+
+            case PursuitRoute pursuitRoute:
+            {
+                // Navigate toward the target's last known region
+                DepartTowardRegion(ship, fromRegion, pursuitRoute.LastKnownRegion, atPort.Port, state, events, lod);
+                return;
+            }
+
+            case PortRoute portRoute
+                when state.Ports.TryGetValue(portRoute.Destination, out var destPort):
+            {
+                if (fromRegion != destPort.RegionId)
+                    DepartTowardRegion(ship, fromRegion, destPort.RegionId, atPort.Port, state, events, lod);
+                return;
+            }
+
+            case null:
+            {
+                // Player ship — only departs via PlayerCommand
+                if (ship.IsPlayerShip) return;
+
+                // NPC ship with no route — assign one if knowledge or docked too long
+                if (ShouldDepartPort(ship, state))
+                    AssignNpcRoute(ship, fromRegion, state);
+
+                // If route was just assigned, try to depart on this same tick
+                if (ship.Route is PortRoute newPortRoute
+                    && state.Ports.TryGetValue(newPortRoute.Destination, out var newDest)
+                    && fromRegion != newDest.RegionId)
+                {
+                    DepartTowardRegion(ship, fromRegion, newDest.RegionId, atPort.Port, state, events, lod);
+                }
+                return;
+            }
+
+            default:
+                return;
         }
+    }
+
+    /// <summary>Depart from port toward a target region (first hop of BFS path).</summary>
+    private void DepartTowardRegion(Ship ship, RegionId from, RegionId to, PortId departPort,
+        WorldState state, IEventEmitter events, SimulationLod lod)
+    {
+        if (from == to) return;
+        var nextRegion = FindNextRegion(from, to, state);
+        if (!nextRegion.HasValue) return;
+        var travelDays = ship.ConvoyId.HasValue
+            ? CalculateConvoyTravelDays(ship.ConvoyId.Value, from, nextRegion.Value, state)
+            : GetTravelDays(from, nextRegion.Value, state);
+        ship.Location = new EnRoute(from, nextRegion.Value, 0f, travelDays);
+        events.Emit(new ShipDeparted(state.Date, lod, ship.Id, departPort), lod);
     }
 
     private void AdvanceShip(Ship ship, EnRoute route, WorldState state,
@@ -175,61 +185,81 @@ public sealed class ShipMovementSystem : IWorldSystem
     private void ArriveInRegion(Ship ship, RegionId regionId, WorldState state,
         IEventEmitter events, SimulationLod lod)
     {
-        // Check if ship has a POI destination in this region — divert to AtPoi
-        if (ship.PoiDestination.HasValue
-            && state.OceanPois.TryGetValue(ship.PoiDestination.Value, out var arrivingPoi)
-            && arrivingPoi.RegionId == regionId)
+        switch (ship.Route)
         {
-            ship.Location = new AtPoi(ship.PoiDestination.Value, regionId);
-            ship.RouteProgressAccumulator = 0;
-            events.Emit(new ShipEnteredRegion(state.Date, lod, ship.Id, regionId), lod);
-            return;
-        }
+            // POI destination in this region — divert to AtPoi
+            case PoiRoute poiRoute
+                when state.OceanPois.TryGetValue(poiRoute.Poi, out var arrivingPoi)
+                     && arrivingPoi.RegionId == regionId:
+                ship.Location = new AtPoi(poiRoute.Poi, regionId);
+                ship.RouteProgressAccumulator = 0;
+                events.Emit(new ShipEnteredRegion(state.Date, lod, ship.Id, regionId), lod);
+                return;
 
-        // Check if ship's routing destination is a port in this region
-        if (ship.RoutingDestination.HasValue &&
-            state.Ports.TryGetValue(ship.RoutingDestination.Value, out var destPort) &&
-            destPort.RegionId == regionId)
-        {
-            // Dock at port
-            var portId = ship.RoutingDestination.Value;
-            ship.Location = new AtPort(portId);
-            ship.ArrivedThisTick = true;
-            ship.RouteProgressAccumulator = 0;
-            ship.RoutingDestination = null;
-            ship.TicksDockedAtCurrentPort = 0;
-
-            // Update port's docked list
-            if (state.Ports.TryGetValue(portId, out var port))
-                port.DockedShips.Add(ship.Id);
-
-            events.Emit(new ShipArrived(state.Date, lod, ship.Id, portId), lod);
-
-            // Check if all living convoy members are now docked → emit FleetArrived and clear convoy
-            if (ship.ConvoyId.HasValue)
+            // Port destination in this region — dock
+            case PortRoute portRoute
+                when state.Ports.TryGetValue(portRoute.Destination, out var destPort2)
+                     && destPort2.RegionId == regionId:
             {
-                var convoyId = ship.ConvoyId.Value;
-                var convoyMembers = state.Ships.Values
-                    .Where(s => s.ConvoyId == convoyId)
-                    .ToList();
+                var portId = portRoute.Destination;
+                ship.Location = new AtPort(portId);
+                ship.ArrivedThisTick = true;
+                ship.RouteProgressAccumulator = 0;
+                ship.Route = null;
+                ship.TicksDockedAtCurrentPort = 0;
 
-                var allDocked = convoyMembers.All(s => s.Location is AtPort ap2 && ap2.Port == portId);
-                if (allDocked)
+                if (state.Ports.TryGetValue(portId, out var port))
+                    port.DockedShips.Add(ship.Id);
+
+                events.Emit(new ShipArrived(state.Date, lod, ship.Id, portId), lod);
+
+                // Check convoy completion
+                if (ship.ConvoyId.HasValue)
                 {
-                    var memberIds = convoyMembers.Select(s => s.Id).ToList();
-                    events.Emit(new FleetArrived(state.Date, lod, memberIds, portId), lod);
-                    foreach (var m in convoyMembers)
-                        m.ConvoyId = null;
+                    var convoyId = ship.ConvoyId.Value;
+                    var convoyMembers = state.Ships.Values
+                        .Where(s => s.ConvoyId == convoyId)
+                        .ToList();
+                    var allDocked = convoyMembers.All(s => s.Location is AtPort ap2 && ap2.Port == portId);
+                    if (allDocked)
+                    {
+                        var memberIds = convoyMembers.Select(s => s.Id).ToList();
+                        events.Emit(new FleetArrived(state.Date, lod, memberIds, portId), lod);
+                        foreach (var m in convoyMembers)
+                            m.ConvoyId = null;
+                    }
                 }
+                return;
+            }
+
+            // PursuitRoute arrived in target's last known region — dock at nearest port for intercept check
+            case PursuitRoute pursuitRoute when pursuitRoute.LastKnownRegion == regionId:
+            {
+                var nearestPort = state.Ports.Values.FirstOrDefault(p => p.RegionId == regionId);
+                if (nearestPort is not null)
+                {
+                    ship.Location = new AtPort(nearestPort.Id);
+                    ship.ArrivedThisTick = true;
+                    ship.RouteProgressAccumulator = 0;
+                    ship.TicksDockedAtCurrentPort = 0;
+                    nearestPort.DockedShips.Add(ship.Id);
+                    events.Emit(new ShipArrived(state.Date, lod, ship.Id, nearestPort.Id), lod);
+                    // Route stays set — QuestSystem will check for intercept and clear
+                }
+                else
+                {
+                    ship.Location = new AtSea(regionId);
+                    ship.RouteProgressAccumulator = 0;
+                    events.Emit(new ShipEnteredRegion(state.Date, lod, ship.Id, regionId), lod);
+                }
+                return;
             }
         }
-        else
-        {
-            // Still at sea in this region
-            ship.Location = new AtSea(regionId);
-            ship.RouteProgressAccumulator = 0;
-            events.Emit(new ShipEnteredRegion(state.Date, lod, ship.Id, regionId), lod);
-        }
+
+        // Default: still in transit — at sea in this region
+        ship.Location = new AtSea(regionId);
+        ship.RouteProgressAccumulator = 0;
+        events.Emit(new ShipEnteredRegion(state.Date, lod, ship.Id, regionId), lod);
     }
 
     private void ExplorePoiTick(Ship ship, AtPoi atPoi, WorldState state,
@@ -238,7 +268,7 @@ public sealed class ShipMovementSystem : IWorldSystem
         if (!state.OceanPois.TryGetValue(atPoi.Poi, out var poi))
         {
             ship.Location = new AtSea(atPoi.Region);
-            ship.PoiDestination = null;
+            ship.Route = null;
             return;
         }
 
@@ -293,7 +323,7 @@ public sealed class ShipMovementSystem : IWorldSystem
 
         // Leave POI
         ship.Location = new AtSea(atPoi.Region);
-        ship.PoiDestination = null;
+        ship.Route = null;
     }
 
     /// <summary>
@@ -358,16 +388,17 @@ public sealed class ShipMovementSystem : IWorldSystem
         // Always depart if docked too long (prevents permanent stranding)
         if (ship.TicksDockedAtCurrentPort >= 5) return true;
 
-        // Depart if captain has market intelligence for accessible ports
-        if (ship.CaptainId.HasValue)
-        {
-            var captainHolder = new IndividualHolder(ship.CaptainId.Value);
-            var hasActionableKnowledge = state.Knowledge.GetFacts(captainHolder)
-                .Any(f => !f.IsSuperseded
-                    && f.Claim is PortPriceClaim
-                    && f.Confidence > 0.40f);
-            if (hasActionableKnowledge) return true;
-        }
+        // Depart if captain or crew has market intelligence for accessible ports
+        // 5A-1: Check both IndividualHolder (captain) and ShipHolder (crew gossip)
+        bool HasActionablePriceKnowledge(KnowledgeHolderId holder) =>
+            state.Knowledge.GetFacts(holder)
+                .Any(f => !f.IsSuperseded && f.Claim is PortPriceClaim && f.Confidence > 0.40f);
+
+        if (ship.CaptainId.HasValue && HasActionablePriceKnowledge(new IndividualHolder(ship.CaptainId.Value)))
+            return true;
+
+        if (HasActionablePriceKnowledge(new ShipHolder(ship.Id)))
+            return true;
 
         return false;
     }
@@ -390,7 +421,7 @@ public sealed class ShipMovementSystem : IWorldSystem
             var bountyDest = EvaluateBountyRoute(ship, npcCaptain, currentRegion, state);
             if (bountyDest.HasValue)
             {
-                ship.RoutingDestination = bountyDest;
+                ship.Route = new PortRoute(bountyDest.Value);
                 var nextReg = FindNextRegion(currentRegion, state.Ports[bountyDest.Value].RegionId, state);
                 if (nextReg.HasValue)
                 {
@@ -401,15 +432,11 @@ public sealed class ShipMovementSystem : IWorldSystem
             }
         }
 
-        // Find the highest-confidence known port that is accessible from current region.
-        // Agent routes toward what they know, not what is objectively best.
+        // 5A-1: Union IndividualHolder + ShipHolder facts, score by expected margin.
+        // Crew gossip (ShipHolder) is the navigator's log — captains consult this.
         var accessiblePortIds = GetAccessiblePortIds(currentRegion, state);
-        var best = state.Knowledge.GetFacts(agentHolder)
-            .Where(f => !f.IsSuperseded && f.Claim is PortPriceClaim pc
-                        && accessiblePortIds.Contains(pc.Port))
-            .OrderByDescending(f => f.Confidence)
-            .Select(f => (PortId?)((PortPriceClaim)f.Claim).Port)
-            .FirstOrDefault();
+        var knownPrices = GetKnownPrices(agentHolder, ship, state, accessiblePortIds);
+        var best = ScoreMerchantDestination(knownPrices, ship, accessiblePortIds);
 
         // Fallback chain: HomePort (if stranded) → random accessible port
         PortId? homePort = null;
@@ -423,7 +450,7 @@ public sealed class ShipMovementSystem : IWorldSystem
         var candidate = best ?? homePort ?? GetRandomAccessiblePort(currentRegion, state);
         if (!candidate.HasValue) return;
 
-        ship.RoutingDestination = candidate;
+        ship.Route = new PortRoute(candidate.Value);
         var nextRegion = FindNextRegion(currentRegion, state.Ports[candidate.Value].RegionId, state);
         if (nextRegion.HasValue)
         {
@@ -564,5 +591,96 @@ public sealed class ShipMovementSystem : IWorldSystem
     {
         var regionId = state.GetShipRegion(ship.Id);
         return regionId.HasValue ? context.GetLod(regionId.Value) : SimulationLod.Distant;
+    }
+
+    // ---- 5A-1: Knowledge-driven merchant routing ----
+
+    /// <summary>
+    /// Union IndividualHolder + ShipHolder price facts for accessible ports.
+    /// Returns the highest-confidence PortPriceClaim per (Port, Good) pair.
+    /// </summary>
+    private static List<(KnowledgeFact Fact, PortPriceClaim Claim)> GetKnownPrices(
+        KnowledgeHolderId agentHolder, Ship ship, WorldState state, HashSet<PortId> accessiblePortIds)
+    {
+        var holders = new List<KnowledgeHolderId> { agentHolder };
+
+        // Add ShipHolder as secondary source (crew gossip = navigator's log)
+        var shipHolder = new ShipHolder(ship.Id);
+        if (agentHolder is not ShipHolder) // avoid duplicate if agent IS the ship
+            holders.Add(shipHolder);
+
+        // Collect all non-superseded PortPriceClaims from both holders
+        var allPriceFacts = new Dictionary<string, (KnowledgeFact Fact, PortPriceClaim Claim)>();
+
+        foreach (var holder in holders)
+        {
+            foreach (var fact in state.Knowledge.GetFacts(holder))
+            {
+                if (fact.IsSuperseded) continue;
+                if (fact.Claim is not PortPriceClaim pc) continue;
+                if (!accessiblePortIds.Contains(pc.Port)) continue;
+
+                // Key by Port+Good — keep highest confidence
+                var key = $"{pc.Port.Value}:{pc.Good}";
+                if (!allPriceFacts.TryGetValue(key, out var existing) || fact.Confidence > existing.Fact.Confidence)
+                    allPriceFacts[key] = (fact, pc);
+            }
+        }
+
+        return allPriceFacts.Values.ToList();
+    }
+
+    /// <summary>
+    /// Score candidate ports by expected trade margin.
+    /// If ship has cargo: find ports with highest known sell prices for carried goods.
+    /// If ship is empty: find ports with lowest known buy prices (buying opportunity).
+    /// Falls back to highest-confidence known port if no margin data available.
+    /// </summary>
+    private static PortId? ScoreMerchantDestination(
+        List<(KnowledgeFact Fact, PortPriceClaim Claim)> knownPrices,
+        Ship ship,
+        HashSet<PortId> accessiblePortIds)
+    {
+        if (knownPrices.Count == 0) return null;
+
+        var hasCargo = ship.Cargo.Any(kv => kv.Value > 0);
+
+        if (hasCargo)
+        {
+            // Score ports by: sum of (known sell price × confidence) for goods we carry
+            var portScores = new Dictionary<PortId, float>();
+            foreach (var (fact, claim) in knownPrices)
+            {
+                if (!ship.Cargo.ContainsKey(claim.Good) || ship.Cargo[claim.Good] <= 0) continue;
+                var score = claim.Price * fact.Confidence * ship.Cargo[claim.Good];
+                portScores.TryGetValue(claim.Port, out var existing);
+                portScores[claim.Port] = existing + score;
+            }
+
+            if (portScores.Count > 0)
+                return portScores.MaxBy(kv => kv.Value).Key;
+        }
+        else
+        {
+            // No cargo — route toward port with lowest known prices (buying opportunity).
+            // Score = inverse price weighted by confidence (lower price = better opportunity).
+            var portScores = new Dictionary<PortId, float>();
+            foreach (var (fact, claim) in knownPrices)
+            {
+                if (claim.Price <= 0) continue;
+                var score = fact.Confidence / claim.Price;
+                portScores.TryGetValue(claim.Port, out var existing);
+                portScores[claim.Port] = existing + score;
+            }
+
+            if (portScores.Count > 0)
+                return portScores.MaxBy(kv => kv.Value).Key;
+        }
+
+        // Fallback: highest-confidence known port (original behaviour)
+        return knownPrices
+            .OrderByDescending(x => x.Fact.Confidence)
+            .Select(x => (PortId?)x.Claim.Port)
+            .FirstOrDefault();
     }
 }

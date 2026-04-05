@@ -28,6 +28,13 @@ public sealed class WorldState
     public Quests.QuestStore Quests  { get; } = new();
     public Dictionary<RegionId, RegionWeather> Weather { get; } = new();
 
+    // ---- NPC goal pursuit (5B) ----
+    /// <summary>
+    /// Active NPC goal pursuits. Lives on WorldState so ShipMovementSystem (system 2)
+    /// can read pursuits for routing, even though QuestSystem (system 8) creates them.
+    /// </summary>
+    public Dictionary<IndividualId, GoalPursuit> NpcPursuits { get; } = new();
+
     // ---- Cross-tick communication ----
     /// <summary>
     /// Stimuli queued by EventPropagationSystem for FactionSystem to

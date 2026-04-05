@@ -14,7 +14,7 @@ public readonly record struct QuestInstanceId(Guid Value)
 
 // ---- Status ----
 
-public enum ContractQuestStatus { Active, LostTrail, Fulfilled, TargetGone, Expired }
+public enum ContractQuestStatus { Active, LostTrail, Fulfilled, TargetGone, Expired, ClaimedByNpc }
 
 // ---- ContractQuestInstance ----
 

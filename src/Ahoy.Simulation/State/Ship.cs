@@ -3,6 +3,22 @@ using Ahoy.Core.Ids;
 
 namespace Ahoy.Simulation.State;
 
+// ---- ShipRoute discriminated union ----
+
+/// <summary>Routing intent — where a ship wants to go and why.</summary>
+public abstract record ShipRoute;
+
+/// <summary>Route to a specific port for trade, resupply, or docking.</summary>
+public record PortRoute(PortId Destination) : ShipRoute;
+
+/// <summary>Pursue a target ship — navigate to last known region, intercept on arrival.</summary>
+public record PursuitRoute(ShipId Target, RegionId LastKnownRegion) : ShipRoute;
+
+/// <summary>Route to an ocean point of interest (wreck, cache, rendezvous).</summary>
+public record PoiRoute(OceanPoiId Poi) : ShipRoute;
+
+// ---- Ship ----
+
 public sealed class Ship
 {
     public ShipId Id { get; init; }
@@ -36,8 +52,11 @@ public sealed class Ship
     /// <summary>Accumulated fractional day progress on current route leg.</summary>
     public float RouteProgressAccumulator { get; set; }
 
-    /// <summary>If set, the ship has a destination it is routing toward.</summary>
-    public PortId? RoutingDestination { get; set; }
+    /// <summary>
+    /// Discriminated routing intent. Replaces PortId? RoutingDestination + OceanPoiId? PoiDestination.
+    /// Null = no active route. Set by ShipMovementSystem, player commands, and NPC goal pursuit.
+    /// </summary>
+    public ShipRoute? Route { get; set; }
 
     /// <summary>
     /// Number of consecutive ticks this ship has been docked at its current port.
@@ -45,9 +64,6 @@ public sealed class Ship
     /// Used to compute idle crew expenditure and knowledge-gated departure.
     /// </summary>
     public int TicksDockedAtCurrentPort { get; set; }
-
-    /// <summary>If set, the ship is routing to this POI instead of a port.</summary>
-    public OceanPoiId? PoiDestination { get; set; }
 
     /// <summary>
     /// Non-null when this ship is part of an active convoy.
