@@ -35,6 +35,19 @@ public record PatrolRegionGoal(
     Guid Id, IndividualId NpcId,
     RegionId Region) : NpcGoal(Id, NpcId);
 
+/// <summary>
+/// Execute a faction mission order. Captain validates route against their knowledge
+/// and can refuse (mutiny) if relationship with viceroy drops below -75.
+/// </summary>
+public record ExecuteOrdersGoal(
+    Guid Id, IndividualId NpcId,
+    FactionMission Mission) : NpcGoal(Id, NpcId);
+
+/// <summary>Recapture a defected port. Assigned to NavalOfficer. (Group 9 Phase 5)</summary>
+public record RecapturePortGoal(
+    Guid Id, IndividualId NpcId,
+    PortId TargetPort) : NpcGoal(Id, NpcId);
+
 // Future goal types:
 // public record TradeGoal(Guid Id, IndividualId NpcId, PortId TargetPort) : NpcGoal(Id, NpcId);
 // public record InvestigateGoal(Guid Id, IndividualId NpcId, string SubjectKey) : NpcGoal(Id, NpcId);

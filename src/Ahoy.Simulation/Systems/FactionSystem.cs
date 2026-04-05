@@ -65,6 +65,8 @@ public sealed class FactionSystem : IWorldSystem
 
             if (faction.Type == FactionType.Colonial)
                 SeedContracts(faction, factionId, state, context);
+
+            AssignMissions(faction, factionId, state, context);
         }
 
         TickBlockadeDetection(state);
@@ -879,5 +881,104 @@ public sealed class FactionSystem : IWorldSystem
             };
             state.Knowledge.AddFact(new FactionHolder(factionId), allegianceFact);
         }
+    }
+
+    // ---- Group 9: Faction Mission Assignment ----
+
+    /// <summary>
+    /// Assign missions to idle faction ships. Evaluates port food levels and
+    /// dispatches ReliefMissions to ports below 50% food target.
+    /// Captained ships get an ExecuteOrdersGoal; headless ships route directly.
+    /// </summary>
+    private void AssignMissions(Faction faction, FactionId factionId,
+        WorldState state, SimulationContext context)
+    {
+        // Find idle faction ships (no mission, docked at a controlled port)
+        var idleShips = state.Ships.Values
+            .Where(s => s.OwnerFactionId == factionId
+                && s.Mission is null
+                && !s.IsPlayerShip
+                && s.Location is AtPort ap
+                && state.Ports.TryGetValue(ap.Port, out var p)
+                && p.ControllingFactionId == factionId)
+            .ToList();
+
+        if (idleShips.Count == 0) return;
+
+        // Evaluate which controlled ports need food relief
+        foreach (var port in state.Ports.Values)
+        {
+            if (port.ControllingFactionId != factionId) continue;
+            var foodTarget = port.Economy.TargetSupply.GetValueOrDefault(TradeGood.Food, 1);
+            var foodSupply = port.Economy.Supply.GetValueOrDefault(TradeGood.Food, 0);
+
+            // Port needs relief if food below 50% of target
+            if (foodSupply >= foodTarget * 0.5f) continue;
+
+            // Find the nearest idle ship at a port with food surplus
+            Ship? bestShip = null;
+            Port? sourcePort = null;
+            float bestDistance = float.MaxValue;
+
+            foreach (var ship in idleShips)
+            {
+                if (ship.Location is not AtPort shipAtPort) continue;
+                if (!state.Ports.TryGetValue(shipAtPort.Port, out var srcPort)) continue;
+                if (srcPort.Id == port.Id) continue; // don't source from the destination
+
+                var srcFood = srcPort.Economy.Supply.GetValueOrDefault(TradeGood.Food, 0);
+                var srcTarget = srcPort.Economy.TargetSupply.GetValueOrDefault(TradeGood.Food, 1);
+                if (srcFood <= srcTarget) continue; // source port has no surplus
+
+                var distance = GetMissionDistance(srcPort.RegionId, port.RegionId, state);
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    bestShip = ship;
+                    sourcePort = srcPort;
+                }
+            }
+
+            if (bestShip is null || sourcePort is null) continue;
+
+            // Calculate how much food to load — surplus from source, capped by cargo space
+            var surplus = sourcePort.Economy.Supply.GetValueOrDefault(TradeGood.Food) -
+                          sourcePort.Economy.TargetSupply.GetValueOrDefault(TradeGood.Food);
+            var deficit = foodTarget - foodSupply;
+            var loadQty = Math.Min(Math.Min(surplus, deficit), bestShip.MaxCargoTons - bestShip.Cargo.Values.Sum());
+            if (loadQty <= 0) continue;
+
+            // Physical cargo sourcing: deduct food from source port
+            sourcePort.Economy.Supply[TradeGood.Food] -= loadQty;
+            bestShip.Cargo[TradeGood.Food] = bestShip.Cargo.GetValueOrDefault(TradeGood.Food) + loadQty;
+
+            // Assign mission
+            var mission = new ReliefMission(port.Id, TradeGood.Food, loadQty);
+            bestShip.Mission = mission;
+            bestShip.Route = new PortRoute(port.Id);
+
+            // If captained, push ExecuteOrdersGoal
+            if (bestShip.CaptainId.HasValue)
+            {
+                state.NpcPursuits[bestShip.CaptainId.Value] = new GoalPursuit
+                {
+                    ActiveGoal = new ExecuteOrdersGoal(Guid.NewGuid(), bestShip.CaptainId.Value, mission),
+                    State = PursuitState.Active,
+                    ActivatedOnTick = context.TickNumber,
+                };
+            }
+
+            // Remove from idle pool
+            idleShips.Remove(bestShip);
+            if (idleShips.Count == 0) break;
+        }
+    }
+
+    private static float GetMissionDistance(RegionId from, RegionId to, WorldState state)
+    {
+        if (from == to) return 0.5f;
+        if (state.Regions.TryGetValue(from, out var region) && region.BaseTravelDays.TryGetValue(to, out var days))
+            return days;
+        return 10f; // default for non-adjacent
     }
 }

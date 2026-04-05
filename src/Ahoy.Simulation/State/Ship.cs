@@ -17,6 +17,28 @@ public record PursuitRoute(ShipId Target, RegionId LastKnownRegion) : ShipRoute;
 /// <summary>Route to an ocean point of interest (wreck, cache, rendezvous).</summary>
 public record PoiRoute(OceanPoiId Poi) : ShipRoute;
 
+// ---- FactionMission — orders from a faction to one of its ships ----
+
+/// <summary>
+/// An order from a faction to a ship it owns. Ships on mission route to the
+/// destination and resolve the mission on arrival. Captained ships execute
+/// via ExecuteOrdersGoal (captain validates route, can mutiny). Headless
+/// ships follow orders mechanically.
+/// </summary>
+public abstract record FactionMission(PortId Destination);
+
+/// <summary>Carry a knowledge fact to a specific port. The diplomatic pouch.</summary>
+public record CourierMission(PortId Destination, KnowledgeFactId CarriedFact) : FactionMission(Destination);
+
+/// <summary>Deliver supplies to a port. Cargo loaded at origin, unloaded on arrival.</summary>
+public record ReliefMission(PortId Destination, TradeGood Cargo, int Quantity) : FactionMission(Destination);
+
+/// <summary>Reinforce a port's defense. Ship's guns contribute to port defense on arrival.</summary>
+public record ReinforceMission(PortId Destination) : FactionMission(Destination);
+
+/// <summary>Patrol a region. Ship loiters intercepting enemies after reaching destination.</summary>
+public record PatrolMission(PortId Destination, RegionId PatrolRegion) : FactionMission(Destination);
+
 // ---- Ship ----
 
 public sealed class Ship
@@ -47,6 +69,11 @@ public sealed class Ship
 
     // --- Economics ---
     public int GoldOnBoard { get; set; }
+
+    // --- Faction mission ---
+    /// <summary>Active faction order. When set, captained ships execute via ExecuteOrdersGoal;
+    /// headless ships route directly to destination.</summary>
+    public FactionMission? Mission { get; set; }
 
     // --- Routing state ---
     /// <summary>Accumulated fractional day progress on current route leg.</summary>

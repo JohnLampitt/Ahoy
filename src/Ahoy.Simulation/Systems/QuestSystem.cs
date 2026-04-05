@@ -461,8 +461,104 @@ public sealed class QuestSystem : IWorldSystem
                 TickRansomPursuit(npcId, npc, ransomGoal, pursuit, state, context, events);
                 break;
 
+            case ExecuteOrdersGoal ordersGoal:
+                TickExecuteOrders(npcId, npc, ordersGoal, pursuit, state, context, events);
+                break;
+
             // ExtortGoal deferred
         }
+    }
+
+    // ---- Group 9: ExecuteOrdersGoal ----
+
+    private static void TickExecuteOrders(IndividualId npcId, Individual npc,
+        ExecuteOrdersGoal goal, GoalPursuit pursuit,
+        WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        var ship = state.Ships.Values.FirstOrDefault(s => s.CaptainId == npcId);
+        if (ship is null) { pursuit.Abandon(); return; }
+
+        // Mutiny check: if captain's relationship with viceroy is nemesis, refuse orders
+        if (npc.FactionId.HasValue)
+        {
+            var viceroy = FindViceroy(npc.FactionId.Value, state);
+            if (viceroy.HasValue && state.GetRelationship(npcId, viceroy.Value) < -75f)
+            {
+                // Mutiny — captain deserts with the ship
+                ship.Mission = null;
+                pursuit.Abandon();
+                return;
+            }
+        }
+
+        // Route toward mission destination
+        if (ship.Route is null)
+            ship.Route = new PortRoute(goal.Mission.Destination);
+
+        // Check if arrived at destination
+        if (ship.Location is AtPort atPort && atPort.Port == goal.Mission.Destination)
+        {
+            ResolveMission(ship, atPort.Port, state, context, events);
+            pursuit.Complete();
+        }
+    }
+
+    /// <summary>Resolve a faction mission when the ship arrives at its destination.</summary>
+    private static void ResolveMission(Ship ship, PortId portId,
+        WorldState state, SimulationContext context, IEventEmitter events)
+    {
+        if (ship.Mission is null) return;
+
+        switch (ship.Mission)
+        {
+            case CourierMission courier:
+                // Deliver the fact to the port and governor
+                var courierFact = state.Knowledge.GetAllFacts()
+                    .FirstOrDefault(f => f.Id == courier.CarriedFact);
+                if (courierFact is not null)
+                {
+                    state.Knowledge.AddFact(new PortHolder(portId), courierFact);
+                    // Also deliver to governor if present
+                    if (state.Ports.TryGetValue(portId, out var port) && port.GovernorId.HasValue)
+                        state.Knowledge.AddFact(new IndividualHolder(port.GovernorId.Value), courierFact);
+                }
+                break;
+
+            case ReliefMission relief:
+                // Transfer cargo from ship to port supply
+                var carried = ship.Cargo.GetValueOrDefault(relief.Cargo);
+                if (carried > 0 && state.Ports.TryGetValue(portId, out var reliefPort))
+                {
+                    reliefPort.Economy.Supply[relief.Cargo] =
+                        reliefPort.Economy.Supply.GetValueOrDefault(relief.Cargo) + carried;
+                    ship.Cargo.Remove(relief.Cargo);
+                }
+                break;
+
+            case ReinforceMission:
+                // Ship stays docked — guns contribute to port defense.
+                // Mission cleared but ship remains (FactionSystem can reassign later).
+                break;
+
+            case PatrolMission patrol:
+                // Begin patrol — set route into the patrol region
+                var patrolPort = state.Ports.Values.FirstOrDefault(p => p.RegionId == patrol.PatrolRegion);
+                if (patrolPort is not null)
+                    ship.Route = new PortRoute(patrolPort.Id);
+                break;
+        }
+
+        ship.Mission = null;
+    }
+
+    /// <summary>Find the viceroy (governor of highest-population port) for a faction.</summary>
+    private static IndividualId? FindViceroy(FactionId factionId, WorldState state)
+    {
+        return state.Ports.Values
+            .Where(p => p.ControllingFactionId == factionId && p.GovernorId.HasValue)
+            .OrderByDescending(p => p.Population)
+            .Select(p => p.GovernorId)
+            .FirstOrDefault();
     }
 
     private static void TickPatrolPursuit(IndividualId npcId, Individual npc,

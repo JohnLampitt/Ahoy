@@ -212,6 +212,11 @@ public sealed class ShipMovementSystem : IWorldSystem
                 if (state.Ports.TryGetValue(portId, out var port))
                     port.DockedShips.Add(ship.Id);
 
+                // Headless mission ships resolve on arrival (captained ships
+                // resolve via ExecuteOrdersGoal in QuestSystem)
+                if (ship.Mission is not null && !ship.CaptainId.HasValue)
+                    ResolveHeadlessMission(ship, portId, state);
+
                 events.Emit(new ShipArrived(state.Date, lod, ship.Id, portId), lod);
 
                 // Check convoy completion
@@ -407,9 +412,17 @@ public sealed class ShipMovementSystem : IWorldSystem
 
     private void AssignNpcRoute(Ship ship, RegionId currentRegion, WorldState state)
     {
+        // Faction mission takes priority — ship follows orders, not merchant logic.
+        // Headless ships route directly. Captained ships route via ExecuteOrdersGoal
+        // (handled in QuestSystem), but if no goal is active yet, set the route here.
+        if (ship.Mission is not null)
+        {
+            ship.Route = new PortRoute(ship.Mission.Destination);
+            return;
+        }
+
         // Determine epistemic agent: named captain uses personal knowledge (IndividualHolder);
         // uncaptained ships use crew collective knowledge (ShipHolder).
-        // This is the Option B placeholder: Individual-first routing without full merchant lifecycle.
         KnowledgeHolderId agentHolder = ship.CaptainId.HasValue
             ? new IndividualHolder(ship.CaptainId.Value)
             : new ShipHolder(ship.Id);
@@ -596,6 +609,39 @@ public sealed class ShipMovementSystem : IWorldSystem
         var degrees = normalised * 45;
 
         return _windModifiers.TryGetValue(degrees, out var mod) ? mod : 1.0f;
+    }
+
+    /// <summary>Resolve a headless ship's mission on arrival. Captained ships use QuestSystem instead.</summary>
+    private static void ResolveHeadlessMission(Ship ship, PortId portId, WorldState state)
+    {
+        if (ship.Mission is null) return;
+
+        switch (ship.Mission)
+        {
+            case ReliefMission relief:
+                var carried = ship.Cargo.GetValueOrDefault(relief.Cargo);
+                if (carried > 0 && state.Ports.TryGetValue(portId, out var port))
+                {
+                    port.Economy.Supply[relief.Cargo] =
+                        port.Economy.Supply.GetValueOrDefault(relief.Cargo) + carried;
+                    ship.Cargo.Remove(relief.Cargo);
+                }
+                break;
+
+            case CourierMission courier:
+                var fact = state.Knowledge.GetAllFacts().FirstOrDefault(f => f.Id == courier.CarriedFact);
+                if (fact is not null)
+                {
+                    state.Knowledge.AddFact(new PortHolder(portId), fact);
+                    if (state.Ports.TryGetValue(portId, out var cp) && cp.GovernorId.HasValue)
+                        state.Knowledge.AddFact(new IndividualHolder(cp.GovernorId.Value), fact);
+                }
+                break;
+
+            // ReinforceMission and PatrolMission: ship stays, handled by FactionSystem
+        }
+
+        ship.Mission = null;
     }
 
     private static SimulationLod GetShipLod(Ship ship, WorldState state, SimulationContext context)
